@@ -213,14 +213,17 @@ class Daemon:
         if len(parts) >= 2 and parts[0].lower() == "resume":
             sid = parts[1]
             session = self._session_mgr.get(sid)
+            if not session:
+                # Try to find in Claude Code's session files
+                session = self._register_external_session(sid, channel_id, thread_ts)
             if session:
                 # Re-bind session to this thread
                 session.channel_id = channel_id
                 session.thread_ts = thread_ts
-                self._session_mgr._thread_index[(channel_id, thread_ts)] = sid
+                self._session_mgr._thread_index[(channel_id, thread_ts)] = session.session_id
                 self._session_mgr._save()
                 blocks = build_session_header_blocks(
-                    session_id=sid, directory=self._config.work_dir
+                    session_id=session.session_id, directory=self._config.work_dir
                 )
                 await self._slack.post_blocks(
                     channel_id, blocks, f"Resumed: {session.session_name}", thread_ts
@@ -255,13 +258,15 @@ class Daemon:
         if len(parts) >= 2 and parts[0].lower() == "resume":
             sid = parts[1]
             session = self._session_mgr.get(sid)
+            if not session:
+                session = self._register_external_session(sid, channel_id, msg_ts)
             if session:
                 session.channel_id = channel_id
                 session.thread_ts = msg_ts
-                self._session_mgr._thread_index[(channel_id, msg_ts)] = sid
+                self._session_mgr._thread_index[(channel_id, msg_ts)] = session.session_id
                 self._session_mgr._save()
                 blocks = build_session_header_blocks(
-                    session_id=sid, directory=self._config.work_dir
+                    session_id=session.session_id, directory=self._config.work_dir
                 )
                 await self._slack.post_blocks(
                     channel_id, blocks, f"Resumed: {session.session_name}", msg_ts
@@ -274,6 +279,32 @@ class Daemon:
                 return
 
         await self._start_new_session(channel_id, msg_ts, text)
+
+    def _register_external_session(
+        self, sid: str, channel_id: str, thread_ts: str
+    ) -> Session | None:
+        """Find a Claude Code session file and register it in daemon."""
+        from pathlib import Path
+        import json as _json
+        claude_dir = Path.home() / ".claude" / "projects"
+        if not claude_dir.is_dir():
+            return None
+        for jsonl in claude_dir.rglob(f"{sid}*.jsonl"):
+            # Extract name from first line
+            name = sid[:12]
+            try:
+                first = _json.loads(jsonl.read_text().split("\n", 1)[0])
+                name = first.get("customTitle", name) or name
+            except Exception:
+                pass
+            return self._session_mgr.create(
+                session_id=jsonl.stem,  # Full ID from filename
+                session_name=name[:30],
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                mode=SessionMode.IDLE,
+            )
+        return None
 
     async def _start_new_session(self, channel_id: str, thread_ts: str, prompt: str) -> None:
         """Create a new session and start claude --print."""
