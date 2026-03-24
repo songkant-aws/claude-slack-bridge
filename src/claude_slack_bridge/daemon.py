@@ -328,7 +328,9 @@ class Daemon:
                 return web.json_response({"error": "unknown session"}, status=404)
 
             # If session is in PROCESS mode AND our --print process is alive,
-            # hooks come from that process — just ack without switching.
+            # hooks come from our --print process — just ack without switching.
+            # (--print processes should use --setting-sources to skip hooks,
+            #  but this is a safety net.)
             if session.mode == SessionMode.PROCESS.value and self._pool.get(session.session_id):
                 session.touch()
                 if hook_type == "pre-tool-use":

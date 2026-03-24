@@ -82,6 +82,7 @@ class ProcessPool:
             "--input-format", "stream-json",
             "--verbose",
             "--session-id", session_id,
+            "--setting-sources", "project,local",  # Skip user settings (hooks)
         ]
         if resume:
             cmd += ["--resume", session_id]
