@@ -222,8 +222,9 @@ class Daemon:
                 session.thread_ts = thread_ts
                 self._session_mgr._thread_index[(channel_id, thread_ts)] = session.session_id
                 self._session_mgr._save()
+                cwd = getattr(session, "_cwd", None) or self._config.work_dir
                 blocks = build_session_header_blocks(
-                    session_id=session.session_id, directory=self._config.work_dir
+                    session_id=session.session_id, directory=cwd
                 )
                 await self._slack.post_blocks(
                     channel_id, blocks, f"Resumed: {session.session_name}", thread_ts
@@ -265,8 +266,9 @@ class Daemon:
                 session.thread_ts = msg_ts
                 self._session_mgr._thread_index[(channel_id, msg_ts)] = session.session_id
                 self._session_mgr._save()
+                cwd = getattr(session, "_cwd", None) or self._config.work_dir
                 blocks = build_session_header_blocks(
-                    session_id=session.session_id, directory=self._config.work_dir
+                    session_id=session.session_id, directory=cwd
                 )
                 await self._slack.post_blocks(
                     channel_id, blocks, f"Resumed: {session.session_name}", msg_ts
