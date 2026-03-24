@@ -231,7 +231,7 @@ class Daemon:
                 )
                 # Start --print process to continue
                 follow_up = " ".join(parts[2:]) if len(parts) > 2 else None
-                await self._resume_process(session, follow_up or "继续")
+                await self._resume_process(session, follow_up)
                 return
             else:
                 await self._slack.post_text(
@@ -274,7 +274,7 @@ class Daemon:
                     channel_id, blocks, f"Resumed: {session.session_name}", msg_ts
                 )
                 follow_up = " ".join(parts[2:]) if len(parts) > 2 else None
-                await self._resume_process(session, follow_up or "继续")
+                await self._resume_process(session, follow_up)
                 return
             else:
                 await self._slack.post_text(channel_id, f"❌ Session `{sid}` not found", msg_ts)
@@ -380,13 +380,13 @@ class Daemon:
         elif session.mode == SessionMode.IDLE.value:
             await self._resume_process(session, text)
 
-    async def _resume_process(self, session: Session, text: str) -> None:
+    async def _resume_process(self, session: Session, text: str | None) -> None:
         """Resume a session in PROCESS mode."""
         self._session_mgr.set_mode(session.session_id, SessionMode.PROCESS)
         cwd = getattr(session, "_cwd", None) or self._config.work_dir
         await self._pool.start(
             session_id=session.session_id,
-            prompt=text,
+            prompt=text,  # None = just start process, don't send message
             resume=True,
             name=session.session_name,
             cwd=cwd,
