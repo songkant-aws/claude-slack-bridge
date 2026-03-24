@@ -177,6 +177,9 @@ class Daemon:
         # Use existing thread_ts if in a thread, otherwise use message ts as thread root
         thread_ts = event.get("thread_ts") or event.get("ts", "")
 
+        # Ack immediately with eyes reaction
+        await self._slack.add_reaction(channel_id, event.get("ts", ""), "eyes")
+
         # Strip bot mention from text
         prompt = text
         if self._bot_user_id:
@@ -223,6 +226,8 @@ class Daemon:
         if not session:
             return
 
+        # Ack immediately
+        await self._slack.add_reaction(channel_id, event.get("ts", ""), "eyes")
         session.touch()
 
         if session.mode == SessionMode.PROCESS.value:

@@ -106,3 +106,10 @@ class SlackClient:
         """Validate token. Returns auth info."""
         resp = await self._web.auth_test()
         return resp.data
+
+    async def add_reaction(self, channel: str, ts: str, emoji: str) -> None:
+        """Add a reaction emoji to a message."""
+        try:
+            await self._web.reactions_add(channel=channel, timestamp=ts, name=emoji)
+        except Exception:
+            pass  # Ignore duplicates or permission errors

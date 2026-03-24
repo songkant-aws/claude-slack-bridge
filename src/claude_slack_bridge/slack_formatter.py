@@ -21,6 +21,7 @@ def build_session_header_blocks(
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    resume_cmd = f"claude --resume {session_id}"
     return [
         {
             "type": "section",
@@ -28,9 +29,9 @@ def build_session_header_blocks(
                 "type": "mrkdwn",
                 "text": (
                     f"*New Claude Code Session*\n"
-                    f"Session: `{session_id}`\n"
-                    f"Directory: `{directory}`\n"
-                    f"Started: {now}"
+                    f"Started: {now}\n\n"
+                    f"Resume in TUI:\n"
+                    f"`{resume_cmd}`"
                 ),
             },
         },
