@@ -154,6 +154,9 @@ class Daemon:
             if etype == "app_mention":
                 await self._handle_mention(event)
             elif etype == "message" and "subtype" not in event and "bot_id" not in event:
+                # Also skip messages from our own bot user
+                if event.get("user") == self._bot_user_id:
+                    return
                 thread_ts = event.get("thread_ts")
                 if thread_ts:
                     await self._handle_thread_reply(event, thread_ts)
