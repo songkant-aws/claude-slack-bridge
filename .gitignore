@@ -1,8 +1,26 @@
 __pycache__/
+*.pyc
 *.egg-info/
 dist/
 build/
 .eggs/
-*.pyc
 .pytest_cache/
 .venv/
+
+# Secrets — never commit
+.env
+*.env
+config.json
+sessions.json
+daemon.pid
+daemon.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
