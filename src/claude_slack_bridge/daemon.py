@@ -356,6 +356,9 @@ class Daemon:
                     await self._slack.post_blocks(
                         session.channel_id, blocks, "Claude response", session.thread_ts
                     )
+                # TUI turn ended — switch back to IDLE so Slack can resume
+                self._session_mgr.set_mode(session.session_id, SessionMode.IDLE)
+                logger.info("Session %s switched to IDLE (TUI stop)", session.session_id)
             elif hook_type == "pre-tool-use" and self._slack:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})
