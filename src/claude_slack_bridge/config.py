@@ -21,6 +21,10 @@ class BridgeConfig:
     truncate_chars: int = 3000
     session_archive_after_secs: int = 86400
     log_level: str = "INFO"
+    max_concurrent_sessions: int = 3
+    stream_throttle_ms: int = 1000
+    hook_heartbeat_timeout_secs: int = 300
+    claude_args: list[str] = field(default_factory=list)
     slack_app_token: str = ""
     slack_bot_token: str = ""
 
@@ -83,6 +87,10 @@ def load_config(config_dir: Path | None = None) -> BridgeConfig:
         truncate_chars=file_data.get("truncate_chars", 3000),
         session_archive_after_secs=file_data.get("session_archive_after_secs", 86400),
         log_level=file_data.get("log_level", "INFO"),
+        max_concurrent_sessions=file_data.get("max_concurrent_sessions", 3),
+        stream_throttle_ms=file_data.get("stream_throttle_ms", 1000),
+        hook_heartbeat_timeout_secs=file_data.get("hook_heartbeat_timeout_secs", 300),
+        claude_args=file_data.get("claude_args", []),
         slack_app_token=app_token,
         slack_bot_token=bot_token,
     )
