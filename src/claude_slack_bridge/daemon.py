@@ -140,7 +140,6 @@ class Daemon:
     # ── Socket Mode handlers ──
 
     async def _on_socket_event(self, client: SocketModeClient, req: SocketModeRequest) -> None:
-        logger.info("Socket event: type=%s", req.type)
         await client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
 
         if req.type == "interactive":
@@ -151,10 +150,6 @@ class Daemon:
         elif req.type == "events_api":
             event = (req.payload or {}).get("event", {})
             etype = event.get("type", "")
-            logger.info("Event: type=%s user=%s subtype=%s bot_id=%s thread_ts=%s text=%s",
-                        etype, event.get("user", ""), event.get("subtype", ""),
-                        event.get("bot_id", ""), event.get("thread_ts", ""),
-                        str(event.get("text", ""))[:80])
 
         if req.type == "interactive":
             payload = req.payload or {}
