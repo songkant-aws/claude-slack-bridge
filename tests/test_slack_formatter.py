@@ -16,7 +16,7 @@ def test_build_session_header_blocks() -> None:
         directory="/workplace/my-project",
     )
     text = json.dumps(blocks)
-    assert "claude --resume abc123" in text
+    assert "cd /workplace/my-project && claude --resume abc123" in text
     assert any(b["type"] == "section" for b in blocks)
 
 

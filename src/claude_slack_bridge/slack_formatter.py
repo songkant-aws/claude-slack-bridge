@@ -21,7 +21,7 @@ def build_session_header_blocks(
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    resume_cmd = f"claude --resume {session_id}"
+    resume_cmd = f"cd {directory} && claude --resume {session_id}" if directory else f"claude --resume {session_id}"
     return [
         {
             "type": "section",

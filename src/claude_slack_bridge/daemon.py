@@ -31,6 +31,8 @@ from claude_slack_bridge.stream_parser import StreamEvent
 
 logger = logging.getLogger("claude_slack_bridge")
 
+_SLACK_MAX_TEXT = 3800  # Leave room for block overhead
+
 
 def _setup_logging(config: BridgeConfig) -> None:
     log_dir = config.config_dir
@@ -55,11 +57,23 @@ class Daemon:
         self._socket_client: SocketModeClient | None = None
         self._runner: web.AppRunner | None = None
         self._bot_user_id: str = ""
-        # Throttle state: session_id -> (msg_ts, last_update, accumulated_text)
+        # Throttle state: session_id -> {msg_ts, last_update, text}
         self._stream_state: dict[str, dict] = {}
         # Trust/YOLO state
-        self._trusted_sessions: set[str] = set()  # session_ids with trust mode
-        self._yolo_mode: bool = False  # global auto-approve
+        self._trusted_sessions: set[str] = set()
+        self._yolo_mode: bool = False
+
+    # ── Helpers ──
+
+    async def _post_long_text(self, session: Session, text: str, label: str = "Claude Response") -> None:
+        """Post text to Slack, splitting into multiple messages if needed."""
+        chunks = _split_text(text, _SLACK_MAX_TEXT)
+        for i, chunk in enumerate(chunks):
+            suffix = f" ({i+1}/{len(chunks)})" if len(chunks) > 1 else ""
+            blocks = build_response_blocks(chunk)
+            await self._slack.post_blocks(
+                session.channel_id, blocks, f"{label}{suffix}", session.thread_ts
+            )
 
     # ── Stream event handler (PROCESS mode: claude stdout → Slack) ──
 
@@ -75,13 +89,11 @@ class Daemon:
             tool = evt.tool_use
             tool_name = tool.get("name", "")
             tool_input = tool.get("input", {})
-            # In PROCESS mode, claude auto-executes tools based on permission-mode.
-            # We just notify in Slack.
             blocks = build_tool_notification_blocks(tool_name, tool_input)
             await self._slack.post_blocks(
                 session.channel_id, blocks, f"Tool: {tool_name}", session.thread_ts
             )
-            # Flush any accumulated stream text before tool notification
+            # Flush accumulated stream text before tool notification
             if session_id in self._stream_state:
                 state = self._stream_state.pop(session_id)
                 await self._flush_stream(session, state)
@@ -105,27 +117,25 @@ class Daemon:
         sid = session.session_id
         now = time.time()
 
+        # Truncate for streaming display (full text posted on result)
+        display = text[:_SLACK_MAX_TEXT]
+
         if sid not in self._stream_state:
-            # First message: post new
-            blocks = build_response_blocks(text)
+            blocks = build_response_blocks(display)
             msg_ts = await self._slack.post_blocks(
                 session.channel_id, blocks, "Claude response", session.thread_ts
             )
-            self._stream_state[sid] = {
-                "msg_ts": msg_ts, "last_update": now, "text": text
-            }
+            self._stream_state[sid] = {"msg_ts": msg_ts, "last_update": now, "text": display}
         else:
             state = self._stream_state[sid]
-            state["text"] = text
+            state["text"] = display
             if now - state["last_update"] >= 1.0:
                 await self._flush_stream(session, state)
 
     async def _flush_stream(self, session: Session, state: dict) -> None:
         blocks = build_response_blocks(state["text"])
         try:
-            await self._slack.update_blocks(
-                session.channel_id, state["msg_ts"], blocks
-            )
+            await self._slack.update_blocks(session.channel_id, state["msg_ts"], blocks)
             state["last_update"] = time.time()
         except Exception:
             logger.debug("Failed to update stream message", exc_info=True)
@@ -133,9 +143,18 @@ class Daemon:
     async def _on_process_exit(self, session_id: str, rc: int | None) -> None:
         logger.info("Process exited for session %s (rc=%s)", session_id, rc)
         session = self._session_mgr.get(session_id)
-        if session and session.mode == SessionMode.PROCESS.value:
+        if not session:
+            return
+        if session.mode == SessionMode.PROCESS.value:
             self._session_mgr.set_mode(session_id, SessionMode.IDLE)
             self._stream_state.pop(session_id, None)
+            # Notify in Slack if abnormal exit
+            if self._slack and rc and rc not in (0, 143):  # 143=SIGTERM is normal
+                await self._slack.post_text(
+                    session.channel_id,
+                    f"⚠️ Claude process exited unexpectedly (code {rc})",
+                    session.thread_ts,
+                )
 
     # ── Socket Mode handlers ──
 
@@ -151,53 +170,64 @@ class Daemon:
             event = (req.payload or {}).get("event", {})
             etype = event.get("type", "")
 
-        if req.type == "interactive":
-            payload = req.payload or {}
-            for action in payload.get("actions", []):
-                await self._handle_interactive(action, payload)
-
-        elif req.type == "events_api":
-            event = (req.payload or {}).get("event", {})
-            etype = event.get("type", "")
-
             if etype == "app_mention":
                 await self._handle_mention(event)
             elif etype == "message" and "subtype" not in event and "bot_id" not in event:
-                # Skip messages from our own bot user
                 if event.get("user") == self._bot_user_id:
                     return
+                channel = event.get("channel", "")
                 thread_ts = event.get("thread_ts")
                 if thread_ts:
                     await self._handle_thread_reply(event, thread_ts)
+                elif channel.startswith("D"):
+                    # DM without thread — treat as new session
+                    await self._handle_dm(event)
 
     async def _handle_mention(self, event: dict) -> None:
         """Handle @bridge mention — create new session in PROCESS mode."""
         channel_id = event.get("channel", "")
         text = event.get("text", "")
-        # Use existing thread_ts if in a thread, otherwise use message ts as thread root
         thread_ts = event.get("thread_ts") or event.get("ts", "")
 
-        # Ack immediately with eyes reaction
         await self._slack.add_reaction(channel_id, event.get("ts", ""), "eyes")
 
-        # Strip bot mention from text
         prompt = text
         if self._bot_user_id:
             prompt = text.replace(f"<@{self._bot_user_id}>", "").strip()
         if not prompt:
             prompt = "Hello"
 
+        await self._start_new_session(channel_id, thread_ts, prompt)
+
+    async def _handle_dm(self, event: dict) -> None:
+        """Handle DM message — create new session or continue existing."""
+        channel_id = event.get("channel", "")
+        text = event.get("text", "")
+        msg_ts = event.get("ts", "")
+
+        await self._slack.add_reaction(channel_id, msg_ts, "eyes")
+
+        # Strip bot mention if present
+        if self._bot_user_id:
+            text = text.replace(f"<@{self._bot_user_id}>", "").strip()
+        if not text:
+            text = "Hello"
+
+        await self._start_new_session(channel_id, msg_ts, text)
+
+    async def _start_new_session(self, channel_id: str, thread_ts: str, prompt: str) -> None:
+        """Create a new session and start claude --print."""
         session_id = str(uuid.uuid4())
         name = prompt[:30].replace("\n", " ")
 
-        # Post session header
-        blocks = build_session_header_blocks(session_id=session_id, directory="")
-        header_ts = await self._slack.post_blocks(
+        blocks = build_session_header_blocks(
+            session_id=session_id, directory=self._config.work_dir
+        )
+        await self._slack.post_blocks(
             channel_id, blocks, f"Session: {name}", thread_ts
         )
 
-        # Create session
-        session = self._session_mgr.create(
+        self._session_mgr.create(
             session_id=session_id,
             session_name=name,
             channel_id=channel_id,
@@ -205,7 +235,6 @@ class Daemon:
             mode=SessionMode.PROCESS,
         )
 
-        # Start claude --print
         await self._pool.start(
             session_id=session_id,
             prompt=prompt,
@@ -220,22 +249,27 @@ class Daemon:
         """Route thread reply based on session mode."""
         channel_id = event.get("channel", "")
         text = event.get("text", "")
-        user = event.get("user", "")
 
         session = self._session_mgr.find_by_thread(channel_id, thread_ts)
         if not session:
             return
 
-        # Ack immediately
         await self._slack.add_reaction(channel_id, event.get("ts", ""), "eyes")
         session.touch()
+
+        # Intercept commands
+        lower = text.strip().lower()
+        if lower == "yolo off":
+            self._yolo_mode = False
+            self._trusted_sessions.discard(session.session_id)
+            await self._slack.post_text(channel_id, "🔒 YOLO/Trust mode disabled", thread_ts)
+            return
 
         if session.mode == SessionMode.PROCESS.value:
             cp = self._pool.get(session.session_id)
             if cp:
                 await cp.send_message(text)
             else:
-                # Process died, restart
                 await self._resume_process(session, text)
 
         elif session.mode == SessionMode.HOOK.value:
@@ -277,9 +311,7 @@ class Daemon:
             self._approval_mgr.resolve(value, "rejected")
 
         elif action_id == "trust_session":
-            # value = session_id
             self._trusted_sessions.add(value)
-            # Resolve any pending approval for this session
             for state in list(self._approval_mgr._pending.values()):
                 state.resolve("approved")
             if self._slack and channel_id and msg_ts:
@@ -323,7 +355,6 @@ class Daemon:
 
         @routes.post("/hooks/{hook_type}")
         async def hook_handler(req: web.Request) -> web.Response:
-            """Handle TUI hooks — switch session to HOOK mode."""
             hook_type = req.match_info["hook_type"]
             payload = await req.json()
             session_key = payload.get("session_key", "")
@@ -332,17 +363,14 @@ class Daemon:
             if not session:
                 return web.json_response({"error": "unknown session"}, status=404)
 
-            # If session is in PROCESS mode AND our --print process is alive,
-            # hooks come from our --print process — just ack without switching.
-            # (--print processes should use --setting-sources to skip hooks,
-            #  but this is a safety net.)
+            # Hooks from our own --print process — ack silently
             if session.mode == SessionMode.PROCESS.value and self._pool.get(session.session_id):
                 session.touch()
                 if hook_type == "pre-tool-use":
                     return web.Response(text="approved")
                 return web.Response(text="ok")
 
-            # Switch to HOOK mode (TUI is active), kill --print process if running
+            # Switch to HOOK mode (TUI active)
             if session.mode != SessionMode.HOOK.value:
                 await self._pool.terminate(session.session_id)
                 self._session_mgr.set_mode(session.session_id, SessionMode.HOOK)
@@ -350,7 +378,6 @@ class Daemon:
 
             session.touch()
 
-            # Forward hook content to Slack
             if hook_type == "user-prompt" and self._slack:
                 blocks = build_user_prompt_blocks(payload.get("prompt", ""))
                 await self._slack.post_blocks(
@@ -359,49 +386,35 @@ class Daemon:
             elif hook_type == "stop" and self._slack:
                 response_text = payload.get("response", "")
                 if response_text:
-                    blocks = build_response_blocks(response_text)
-                    await self._slack.post_blocks(
-                        session.channel_id, blocks, "Claude response", session.thread_ts
-                    )
-                # TUI turn ended — switch back to IDLE so Slack can resume
+                    await self._post_long_text(session, response_text)
                 self._session_mgr.set_mode(session.session_id, SessionMode.IDLE)
                 logger.info("Session %s switched to IDLE (TUI stop)", session.session_id)
             elif hook_type == "pre-tool-use" and self._slack:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})
 
-                # Auto-approve: whitelist, trust, or yolo
                 if (not self._config.require_approval
                         or tool_name in self._config.auto_approve_tools
                         or self._yolo_mode
                         or session_key in self._trusted_sessions):
-                    # Notify in Slack
                     blocks = build_tool_notification_blocks(tool_name, tool_input)
                     await self._slack.post_blocks(
                         session.channel_id, blocks, f"Auto-approved: {tool_name}", session.thread_ts
                     )
                     return web.Response(text="approved")
 
-                # Interactive approval: post buttons, wait for click
                 request_id = payload.get("request_id", str(uuid.uuid4()))
                 state = self._approval_mgr.create(request_id)
-
                 blocks = build_approval_blocks(
-                    tool_name, tool_input, session_key,
-                    session.session_name, request_id,
+                    tool_name, tool_input, session_key, session.session_name, request_id,
                 )
                 await self._slack.post_blocks(
                     session.channel_id, blocks, f"Approve {tool_name}?", session.thread_ts
                 )
-
-                # Block until user clicks button or timeout
                 decision = await state.wait(timeout=self._config.approval_timeout_secs)
                 self._approval_mgr.cleanup(request_id)
-
-                # If trust was enabled during wait, approve
                 if session_key in self._trusted_sessions or self._yolo_mode:
                     decision = "approved"
-
                 return web.Response(text=decision if decision != "timed_out" else "rejected")
 
             return web.Response(text="ok")
@@ -418,7 +431,6 @@ class Daemon:
 
         self._slack = SlackClient(self._config.slack_bot_token)
 
-        # Get bot user ID for mention stripping
         try:
             auth = await self._slack.auth_test()
             self._bot_user_id = auth.get("user_id", "")
@@ -426,7 +438,6 @@ class Daemon:
         except Exception:
             logger.warning("Failed to get bot user ID", exc_info=True)
 
-        # HTTP API
         app = self._create_http_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -438,7 +449,6 @@ class Daemon:
             raise SystemExit(1) from e
         logger.info("HTTP API listening on 127.0.0.1:%d", self._config.daemon_port)
 
-        # Socket Mode
         if self._config.slack_app_token and self._config.slack_bot_token:
             self._socket_client = SocketModeClient(
                 app_token=self._config.slack_app_token,
@@ -450,11 +460,9 @@ class Daemon:
         else:
             logger.warning("Slack tokens not configured — HTTP-only mode")
 
-        # PID file
         pid_file = self._config.config_dir / "daemon.pid"
         pid_file.write_text(str(os.getpid()))
 
-        # Wait for shutdown signal
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -472,3 +480,21 @@ class Daemon:
             await self._runner.cleanup()
         pid_file = self._config.config_dir / "daemon.pid"
         pid_file.unlink(missing_ok=True)
+
+
+def _split_text(text: str, max_len: int) -> list[str]:
+    """Split text into chunks, preferring line boundaries."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Find last newline within limit
+        cut = text.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
