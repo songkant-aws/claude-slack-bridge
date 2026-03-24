@@ -66,6 +66,28 @@ class Daemon:
         else:
             logger.warning("Unknown action_id: %s", action_id)
 
+    async def _handle_thread_reply(
+        self, channel_id: str, thread_ts: str, text: str, user: str
+    ) -> None:
+        """Handle a user reply in a session thread — queue it for Claude Code."""
+        mapping = self._registry.find_by_thread(channel_id, thread_ts)
+        if mapping is None:
+            logger.debug("Ignoring reply in unknown thread %s", thread_ts)
+            return
+
+        # Write reply to a queue file that Claude Code hooks can poll
+        queue_dir = self._config.config_dir / "replies" / mapping.session_id
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        import time
+        reply_file = queue_dir / f"{int(time.time() * 1000)}.txt"
+        reply_file.write_text(text)
+        logger.info("Queued Slack reply for session %s: %s", mapping.session_id, text[:80])
+
+        # Ack in Slack
+        await self._slack.post_text(
+            channel_id, f"📨 Queued for Claude Code session", thread_ts
+        )
+
     async def _on_socket_event(
         self,
         client: SocketModeClient,
@@ -91,6 +113,18 @@ class Daemon:
                     channel=channel_id,
                     msg_ts=msg_ts,
                 )
+
+        elif req.type == "events_api":
+            event = (req.payload or {}).get("event", {})
+            if event.get("type") == "message" and "subtype" not in event:
+                thread_ts = event.get("thread_ts")
+                if thread_ts:  # Only handle threaded replies
+                    await self._handle_thread_reply(
+                        channel_id=event.get("channel", ""),
+                        thread_ts=thread_ts,
+                        text=event.get("text", ""),
+                        user=event.get("user", ""),
+                    )
 
     async def start(self) -> None:
         """Start the daemon: HTTP server + Slack Socket Mode."""

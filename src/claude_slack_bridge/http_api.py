@@ -219,6 +219,21 @@ def create_app(
 
         return web.Response(text="ok")
 
+    @routes.get("/sessions/{session_id}/replies")
+    async def get_replies(request: web.Request) -> web.Response:
+        """Pop queued Slack replies for a session."""
+        session_id = request.match_info["session_id"]
+        queue_dir = config.config_dir / "replies" / session_id
+        if not queue_dir.is_dir():
+            return web.json_response({"replies": []})
+        replies = []
+        for f in sorted(queue_dir.iterdir()):
+            replies.append(f.read_text())
+            f.unlink()
+        if not any(queue_dir.iterdir()):
+            queue_dir.rmdir()
+        return web.json_response({"replies": replies})
+
     app = web.Application()
     app.router.add_routes(routes)
     return app

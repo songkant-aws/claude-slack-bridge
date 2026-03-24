@@ -64,6 +64,13 @@ class SessionRegistry:
             m.status = "archived"
             self.save()
 
+    def find_by_thread(self, channel_id: str, thread_ts: str) -> SessionMapping | None:
+        """Reverse-lookup: find active session by channel + thread_ts."""
+        for m in self._sessions.values():
+            if m.status == "active" and m.channel_id == channel_id and m.thread_ts == thread_ts:
+                return m
+        return None
+
     def list_active(self) -> list[SessionMapping]:
         return [m for m in self._sessions.values() if m.status == "active"]
 
