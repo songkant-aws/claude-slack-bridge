@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 import logging
+import ssl
+from pathlib import Path
 from typing import Any
 
 from slack_sdk.web.async_client import AsyncWebClient
 
 logger = logging.getLogger(__name__)
 
+_CA_BUNDLE_PATHS = [
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-certificates.crt",
+]
+
+
+def _make_ssl_context() -> ssl.SSLContext | None:
+    """Create an SSL context using the system CA bundle."""
+    for path in _CA_BUNDLE_PATHS:
+        if Path(path).is_file():
+            return ssl.create_default_context(cafile=path)
+    return None
+
 
 class SlackClient:
     """Thin async wrapper around Slack Web API."""
 
     def __init__(self, bot_token: str) -> None:
-        self._web = AsyncWebClient(token=bot_token)
+        ssl_ctx = _make_ssl_context()
+        self._web = AsyncWebClient(token=bot_token, ssl=ssl_ctx)
 
     @property
     def web(self) -> AsyncWebClient:
@@ -89,4 +105,4 @@ class SlackClient:
     async def auth_test(self) -> dict:
         """Validate token. Returns auth info."""
         resp = await self._web.auth_test()
-        return dict(resp)
+        return resp.data
