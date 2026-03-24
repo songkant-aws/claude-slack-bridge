@@ -83,6 +83,7 @@ class ProcessPool:
             "--verbose",
             "--session-id", session_id,
             "--setting-sources", "project,local",  # Skip user settings (hooks)
+            "--system-prompt", "When presenting choices to the user, end your response with [OPTIONS: choice1 | choice2 | choice3] format. Max 5 options.",
         ]
         if resume:
             cmd += ["--resume", session_id]
