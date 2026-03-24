@@ -28,7 +28,10 @@ class ClaudeProcess:
             logger.warning("Cannot send to dead process %s", self.session_id)
             return
         import json
-        line = json.dumps({"type": "user", "content": text}) + "\n"
+        line = json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+        }) + "\n"
         self.process.stdin.write(line.encode())
         await self.process.stdin.drain()
 
@@ -75,6 +78,7 @@ class ProcessPool:
         cmd = [
             "claude", "--print",
             "--output-format", "stream-json",
+            "--input-format", "stream-json",
             "--verbose",
             "--session-id", session_id,
         ]
@@ -84,8 +88,6 @@ class ProcessPool:
             cmd += ["--name", name]
         if extra_args:
             cmd += extra_args
-        if prompt:
-            cmd += ["-p", prompt]
 
         logger.info("Starting claude process: %s", " ".join(cmd))
 
@@ -104,6 +106,12 @@ class ProcessPool:
         cp._reader_task = asyncio.create_task(
             self._read_stdout(cp, on_event, on_exit)
         )
+
+        # Send initial prompt via stdin (not -p flag, which exits after one turn)
+        if prompt:
+            # Small delay to let process initialize
+            await asyncio.sleep(0.5)
+            await cp.send_message(prompt)
 
         return cp
 
