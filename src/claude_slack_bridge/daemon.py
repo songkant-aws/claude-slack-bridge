@@ -297,13 +297,18 @@ class Daemon:
                 name = first.get("customTitle", name) or name
             except Exception:
                 pass
-            return self._session_mgr.create(
-                session_id=jsonl.stem,  # Full ID from filename
+            # Derive cwd from project dir name: -workplace-foo-bar → /workplace/foo/bar
+            project_dir = jsonl.parent.name
+            cwd = "/" + project_dir.lstrip("-").replace("-", "/")
+            session = self._session_mgr.create(
+                session_id=jsonl.stem,
                 session_name=name[:30],
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 mode=SessionMode.IDLE,
             )
+            session._cwd = cwd  # Stash cwd for resume
+            return session
         return None
 
     async def _start_new_session(self, channel_id: str, thread_ts: str, prompt: str) -> None:
@@ -376,12 +381,13 @@ class Daemon:
     async def _resume_process(self, session: Session, text: str) -> None:
         """Resume a session in PROCESS mode."""
         self._session_mgr.set_mode(session.session_id, SessionMode.PROCESS)
+        cwd = getattr(session, "_cwd", None) or self._config.work_dir
         await self._pool.start(
             session_id=session.session_id,
             prompt=text,
             resume=True,
             name=session.session_name,
-            cwd=self._config.work_dir,
+            cwd=cwd,
             extra_args=self._config.claude_args,
             on_event=self._on_stream_event,
             on_exit=self._on_process_exit,
