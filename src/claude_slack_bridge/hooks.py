@@ -26,10 +26,7 @@ def _build_hook_payload(event_type: str, stdin_json: dict) -> dict:
     if event_type == "user-prompt":
         payload["prompt"] = stdin_json.get("prompt", "")
     if event_type == "stop":
-        payload["response"] = stdin_json.get("response", "")
-        payload["stop_hook_active_tool_names"] = stdin_json.get(
-            "stop_hook_active_tool_names", []
-        )
+        payload["response"] = stdin_json.get("last_assistant_message", "") or stdin_json.get("response", "")
 
     return payload
 
