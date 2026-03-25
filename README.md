@@ -4,37 +4,72 @@ Bridge Claude Code sessions to Slack — chat with Claude from your phone via Sl
 
 ## How it works
 
-A daemon runs in the background, connecting Claude Code's `--print` mode to Slack via Socket Mode:
+A daemon runs in the background, connecting Claude Code to Slack via Socket Mode:
 
 ```
 Slack Thread ←→ Daemon ←→ claude --print (stdin/stdout)
+       ↑                         ↑
+       └── TUI hooks sync ───────┘
 ```
 
 **Dual-mode architecture:**
 - **PROCESS mode** — Slack drives Claude via `--print` subprocess
-- **HOOK mode** — TUI drives Claude, hooks sync to Slack
+- **TUI sync** — hooks sync TUI prompts & responses to Slack thread
 - **IDLE mode** — session paused, either side can resume
+
+TUI and Slack can operate on the same session simultaneously — Slack uses `--resume --print` alongside the running TUI.
 
 ## Features
 
 - **@mention** in any channel to start a session
-- **DM** the bot directly (no @mention needed)
+- **DM** the bot directly — supports both traditional and Chat mode (Agents & Assistants)
 - **Thread replies** continue the conversation (multi-turn)
-- **Tool notifications** — see Bash, Read, Write calls in real-time
-- **Streaming responses** — live updates as Claude types
+- **🤔 thinking...** indicator while Claude processes
+- **Streaming responses** — live preview updates, final result overwrites progress
+- **No "See more"** — responses use plain text to avoid Slack truncation
+- **Tool call progress** — `🔧 Bash: git log...` merged into single progress message
 - **OPTIONS buttons** — clickable suggestion buttons in Slack
 - **👀 reaction** — instant acknowledgment when message received
-- **`resume <session-id>`** — bind a TUI session to a Slack thread
+- **TUI ↔ Slack sync** — TUI prompts and responses sync to Slack thread via hooks
+- **Session binding** — `/slack-bridge` command auto-binds TUI session to Slack DM
+- **`resume <session-id>`** — bind any TUI session to a Slack thread
 - **Session header** — one-click copy `cd /path && claude --resume <UUID>`
 - **Markdown → mrkdwn** — proper formatting in Slack
 - **Long message splitting** — auto-split at ~3800 chars
 - **`yolo off`** — disable auto-approve in thread
+- **Max concurrent sessions** — configurable limit prevents resource exhaustion
+- **Session cleanup** — stale sessions auto-terminated after timeout
+- **Smart cwd inference** — greedy path decoding handles hyphens in directory names
 
 ## Install
 
+### As Claude Code Plugin (recommended)
+
 ```bash
-# Clone and setup
-git clone <repo-url>
+# Clone
+git clone https://github.com/qianheng-aws/claude-slack-bridge.git
+cd claude-slack-bridge
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# Register as Claude Code marketplace
+claude plugins marketplace add /path/to/claude-slack-bridge
+claude plugins install slack-bridge@qianheng-plugins
+
+# Initialize config
+.venv/bin/claude-slack-bridge init
+# Edit ~/.claude/slack-bridge/.env with your Slack tokens
+```
+
+Then in Claude Code TUI:
+```
+/slack-bridge    → start daemon + bind session to Slack DM
+```
+
+### Manual Setup
+
+```bash
+git clone https://github.com/qianheng-aws/claude-slack-bridge.git
 cd claude-slack-bridge
 python3 -m venv .venv
 .venv/bin/pip install -e .
@@ -42,7 +77,7 @@ python3 -m venv .venv
 # Initialize config
 .venv/bin/claude-slack-bridge init
 
-# Edit ~/.claude/slack-bridge/.env with your Slack tokens:
+# Edit ~/.claude/slack-bridge/.env:
 #   SLACK_BOT_TOKEN=xoxb-...
 #   SLACK_APP_TOKEN=xapp-...
 ```
@@ -51,28 +86,38 @@ python3 -m venv .venv
 
 1. Create app at https://api.slack.com/apps
 2. Enable **Socket Mode** (generates `xapp-` token)
-3. Add **Bot Token Scopes**: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `im:history`, `reactions:write`
+3. Add **Bot Token Scopes**: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `im:history`, `im:read`, `reactions:write`
 4. **Event Subscriptions** → Subscribe to bot events: `app_mention`, `message.channels`, `message.im`
 5. **Interactivity** → Enable (for OPTIONS buttons)
 6. Install app to workspace, invite bot to channels
 
+### Enable TUI → Slack Sync
+
+Add hooks to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "/path/to/claude-slack-bridge/bin/claude-slack-bridge-hook user-prompt"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/path/to/claude-slack-bridge/bin/claude-slack-bridge-hook stop"}]}]
+  }
+}
+```
+
+The `--print` subprocess sets `CLAUDE_SLACK_BRIDGE_PRINT=1` so hooks auto-skip, preventing loops.
+
 ## Usage
 
-### Start daemon
+### Plugin Commands
 
-```bash
-.venv/bin/claude-slack-bridge start
-```
+| Command | Effect |
+|---------|--------|
+| `/slack-bridge` | Start daemon + bind current session to Slack DM |
+| `/slack-bridge-stop` | Stop daemon |
+| `/slack-bridge-status` | Show status and active sessions |
+| `/slack-bridge-logs` | View recent daemon logs |
 
-### As Claude Code plugin
-
-```
-/slack-bridge        # start daemon
-/slack-bridge-stop   # stop daemon
-/slack-bridge-status # show status
-```
-
-### Slack commands
+### Slack Commands
 
 | Command | Where | Effect |
 |---------|-------|--------|
@@ -83,21 +128,30 @@ python3 -m venv .venv
 | `resume <UUID>` | DM | Bind TUI session to thread |
 | `yolo off` | Thread | Disable auto-approve |
 
-### Switch between TUI and Slack
+### Makefile Shortcuts
 
-**Slack → TUI:** Copy the resume command from session header
 ```bash
-cd /path && claude --resume <UUID>
+make install   # setup venv and install
+make test      # run tests
+make start     # start daemon
+make stop      # stop daemon
+make status    # health check + sessions
+make logs      # tail daemon log
 ```
 
-**TUI → Slack:** Send in Slack
+### TUI ↔ Slack Workflow
+
 ```
-@bot resume <UUID>
+1. Start TUI:     claude
+2. Bind to Slack:  /slack-bridge
+3. Chat in TUI  →  prompts & responses sync to Slack thread
+4. Reply in Slack → Claude responds in Slack (same session context)
+5. Exit TUI      →  continue from Slack, or resume later
 ```
 
 ## Config
 
-`~/.claude/slack-bridge/config.json`:
+`~/.claude/slack-bridge/config.json` (see `config.json.example`):
 
 ```json
 {
@@ -106,7 +160,9 @@ cd /path && claude --resume <UUID>
   "claude_args": ["--tools", "Bash,Read,Write,Edit,Glob,Grep"],
   "require_approval": false,
   "auto_approve_tools": ["Read", "Glob", "Grep"],
-  "approval_timeout_secs": 300
+  "approval_timeout_secs": 300,
+  "max_concurrent_sessions": 3,
+  "session_archive_after_secs": 3600
 }
 ```
 
@@ -117,5 +173,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full dual-mode state machine desi
 ## Tests
 
 ```bash
+make test
+# or
 .venv/bin/pytest tests/ -q
 ```
+
+## License
+
+[MIT](LICENSE)
