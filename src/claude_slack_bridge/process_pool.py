@@ -82,7 +82,7 @@ class ProcessPool:
             "--input-format", "stream-json",
             "--verbose",
             "--setting-sources", "project,local",
-            "--system-prompt", "When presenting choices to the user, end your response with [OPTIONS: choice1 | choice2 | choice3] format. Max 5 options.",
+            "--system-prompt", f"You are a Claude Code agent connected to Slack via Claude Slack Bridge. Your session ID is: {session_id}. Users interact with you through Slack threads. Be concise — Slack messages should be short and readable. When presenting choices, end with [OPTIONS: choice1 | choice2 | choice3] format (max 5). Use Chinese if the user writes in Chinese.",
         ]
         if resume:
             cmd += ["--resume", session_id]
