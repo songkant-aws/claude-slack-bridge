@@ -570,13 +570,9 @@ class Daemon:
             if not session:
                 return web.json_response({"error": "unknown session"}, status=404)
 
-            # TUI hook arrived — kill any --print process (TUI takes priority)
-            if self._pool.get(session.session_id):
-                await self._pool.terminate(session.session_id)
-                self._session_mgr.set_mode(session.session_id, SessionMode.IDLE)
-
+            # TUI hook arrived — just sync to Slack, don't kill --print
             session.touch()
-            session._tui_active = time.time()  # Mark TUI as active
+            session._tui_active = time.time()
 
             # Sync TUI content to Slack (without blocking or switching modes)
             if hook_type == "user-prompt" and self._slack and session.channel_id:

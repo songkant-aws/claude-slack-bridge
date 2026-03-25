@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
@@ -97,12 +98,14 @@ class ProcessPool:
 
         logger.info("Starting claude process: %s", " ".join(cmd))
 
+        env = {**os.environ, "CLAUDE_SLACK_BRIDGE_PRINT": "1"}
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
         )
 
         cp = ClaudeProcess(session_id=session_id, process=proc)

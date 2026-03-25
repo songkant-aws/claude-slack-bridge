@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 import urllib.error
@@ -51,6 +52,10 @@ def _post_to_daemon(endpoint: str, payload: dict, port: int, timeout: int) -> st
 
 def run_hook(event_type: str) -> int:
     """Main entry point for hook subcommands. Returns exit code."""
+    # Skip hooks from our own --print process
+    if os.environ.get("CLAUDE_SLACK_BRIDGE_PRINT"):
+        return 0
+
     stdin_data = sys.stdin.read()
     try:
         stdin_json = json.loads(stdin_data) if stdin_data.strip() else {}
