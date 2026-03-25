@@ -30,25 +30,12 @@ TUI and Slack can operate on the same session simultaneously — Slack uses `--r
 
 ## Features
 
-- **@mention** in any channel to start a session
-- **DM** the bot directly — supports both traditional and Chat mode (Agents & Assistants)
-- **Thread replies** continue the conversation (multi-turn)
-- **🤔 thinking...** indicator while Claude processes
-- **Streaming responses** — live preview updates, final result overwrites progress
-- **No "See more"** — responses use plain text to avoid Slack truncation
-- **Tool call progress** — `🔧 Bash: git log...` merged into single progress message
-- **OPTIONS buttons** — clickable suggestion buttons in Slack
-- **👀 reaction** — instant acknowledgment when message received
-- **TUI ↔ Slack sync** — TUI prompts and responses sync to Slack thread via hooks
+- **@mention or DM** to start a session — thread replies continue the conversation
+- **TUI ↔ Slack sync** — prompts and responses sync to a Slack thread via hooks
 - **Session binding** — `/slack-bridge` command auto-binds TUI session to Slack DM
-- **`resume <session-id>`** — bind any TUI session to a Slack thread
-- **Session header** — one-click copy `cd /path && claude --resume <UUID>`
-- **Markdown → mrkdwn** — proper formatting in Slack
-- **Long message splitting** — auto-split at ~3800 chars
-- **`yolo off`** — disable auto-approve in thread
-- **Max concurrent sessions** — configurable limit prevents resource exhaustion
-- **Session cleanup** — stale sessions auto-terminated after timeout
-- **Smart cwd inference** — greedy path decoding handles hyphens in directory names
+- **Streaming responses** — live preview updates, final result overwrites progress
+- **OPTIONS buttons** — clickable suggestion buttons in Slack
+- **Markdown → mrkdwn** — proper formatting, long messages auto-split
 
 ## Install
 
