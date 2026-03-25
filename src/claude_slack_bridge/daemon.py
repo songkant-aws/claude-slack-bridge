@@ -528,51 +528,25 @@ class Daemon:
             if not session:
                 return web.json_response({"error": "unknown session"}, status=404)
 
+            # If our --print process is alive, ack silently (hook from --print itself)
             if session.mode == SessionMode.PROCESS.value and self._pool.get(session.session_id):
                 session.touch()
                 return web.Response(text="approved" if hook_type == "pre-tool-use" else "ok")
 
-            if session.mode != SessionMode.HOOK.value:
-                await self._pool.terminate(session.session_id)
-                self._session_mgr.set_mode(session.session_id, SessionMode.HOOK)
-
             session.touch()
 
-            if hook_type == "user-prompt" and self._slack:
+            # Sync TUI content to Slack (without blocking or switching modes)
+            if hook_type == "user-prompt" and self._slack and session.channel_id:
                 blocks = build_user_prompt_blocks(payload.get("prompt", ""))
                 await self._slack.post_blocks(
-                    session.channel_id, blocks, "User prompt", session.thread_ts
+                    session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
                 )
-            elif hook_type == "stop" and self._slack:
+            elif hook_type == "stop" and self._slack and session.channel_id:
                 response_text = payload.get("response", "")
                 if response_text:
                     await self._finalize_progress(session, response_text)
-                self._session_mgr.set_mode(session.session_id, SessionMode.IDLE)
-            elif hook_type == "pre-tool-use" and self._slack:
-                tool_name = payload.get("tool_name", "")
-                tool_input = payload.get("tool_input", {})
-                if (not self._config.require_approval
-                        or tool_name in self._config.auto_approve_tools
-                        or self._yolo_mode
-                        or session_key in self._trusted_sessions):
-                    blocks = build_tool_notification_blocks(tool_name, tool_input)
-                    await self._slack.post_blocks(
-                        session.channel_id, blocks, f"Auto-approved: {tool_name}", session.thread_ts
-                    )
-                    return web.Response(text="approved")
-                request_id = payload.get("request_id", str(uuid.uuid4()))
-                state = self._approval_mgr.create(request_id)
-                blocks = build_approval_blocks(
-                    tool_name, tool_input, session_key, session.session_name, request_id,
-                )
-                await self._slack.post_blocks(
-                    session.channel_id, blocks, f"Approve {tool_name}?", session.thread_ts
-                )
-                decision = await state.wait(timeout=self._config.approval_timeout_secs)
-                self._approval_mgr.cleanup(request_id)
-                if session_key in self._trusted_sessions or self._yolo_mode:
-                    decision = "approved"
-                return web.Response(text=decision if decision != "timed_out" else "rejected")
+            elif hook_type == "pre-tool-use":
+                return web.Response(text="approved")
 
             return web.Response(text="ok")
 
