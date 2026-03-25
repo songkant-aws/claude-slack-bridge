@@ -1,0 +1,7 @@
+{
+  "name": "slack-bridge",
+  "description": "Bridge Claude Code sessions to Slack — chat with Claude from your phone via Slack threads",
+  "author": {
+    "name": "qianheng"
+  }
+}

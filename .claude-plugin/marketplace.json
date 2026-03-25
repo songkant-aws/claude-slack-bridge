@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "qianheng-plugins",
+  "description": "Personal Claude Code plugins by qianheng",
+  "owner": {
+    "name": "qianheng"
+  },
+  "plugins": [
+    {
+      "name": "slack-bridge",
+      "description": "Bridge Claude Code sessions to Slack — chat with Claude from your phone via Slack threads",
+      "source": "./plugins/slack-bridge",
+      "category": "productivity"
+    }
+  ]
+}
