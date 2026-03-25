@@ -127,7 +127,8 @@ class Daemon:
                     session.channel_id, display[:_SLACK_MAX_TEXT], session.thread_ts
                 )
         else:
-            chunks = _split_text(display, _SLACK_MAX_TEXT)
+            titled = f"*Claude Response*\n\n{display}"
+            chunks = _split_text(titled, _SLACK_MAX_TEXT)
             for chunk in chunks:
                 await self._slack.post_text(
                     session.channel_id, chunk, session.thread_ts
@@ -588,27 +589,29 @@ class Daemon:
                 resp = await self._slack._web.conversations_open(users=owner_id)
                 dm_channel = resp["channel"]["id"]
 
-            # Post session header as thread root
-            blocks = build_session_header_blocks(session_id=session_id, directory=cwd)
-            thread_ts = await self._slack.post_blocks(
-                dm_channel, blocks, f"Session: {session_name}"
-            )
-
-            # Register session
+            # Reuse existing thread if session already bound
             session = self._session_mgr.get(session_id)
-            if not session:
-                session = self._session_mgr.create(
-                    session_id=session_id,
-                    session_name=session_name,
-                    channel_id=dm_channel,
-                    thread_ts=thread_ts,
-                    mode=SessionMode.IDLE,
-                )
+            if session and session.thread_ts and session.channel_id == dm_channel:
+                thread_ts = session.thread_ts
             else:
-                session.channel_id = dm_channel
-                session.thread_ts = thread_ts
-                self._session_mgr._thread_index[(dm_channel, thread_ts)] = session.session_id
-                self._session_mgr._save()
+                # New session — post header as thread root
+                blocks = build_session_header_blocks(session_id=session_id, directory=cwd)
+                thread_ts = await self._slack.post_blocks(
+                    dm_channel, blocks, f"Session: {session_name}"
+                )
+                if not session:
+                    session = self._session_mgr.create(
+                        session_id=session_id,
+                        session_name=session_name,
+                        channel_id=dm_channel,
+                        thread_ts=thread_ts,
+                        mode=SessionMode.IDLE,
+                    )
+                else:
+                    session.channel_id = dm_channel
+                    session.thread_ts = thread_ts
+                    self._session_mgr._thread_index[(dm_channel, thread_ts)] = session.session_id
+                    self._session_mgr._save()
             session._cwd = cwd
 
             return web.json_response({
@@ -632,7 +635,7 @@ class Daemon:
             session.touch()
             session._tui_active = time.time()
 
-            # Sync TUI content to Slack (without blocking or switching modes)
+            # Sync TUI content to Slack
             if hook_type == "user-prompt" and self._slack and session.channel_id:
                 blocks = build_user_prompt_blocks(payload.get("prompt", ""))
                 await self._slack.post_blocks(
