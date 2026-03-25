@@ -83,7 +83,7 @@ class ProcessPool:
             "--input-format", "stream-json",
             "--verbose",
             "--setting-sources", "project,local",
-            "--system-prompt", f"You are a Claude Code agent connected to Slack via Claude Slack Bridge. Your session ID is: {session_id}. Users interact with you through Slack threads. Be concise — Slack messages should be short and readable. When presenting choices, end with [OPTIONS: choice1 | choice2 | choice3] format (max 5). Use Chinese if the user writes in Chinese.",
+            "--system-prompt", f"You are a Claude Code agent connected to Slack via Claude Slack Bridge. Your session ID is: {session_id}. Users interact with you through Slack threads. Be concise — Slack messages should be short and readable. When presenting choices, end with [OPTIONS: choice1 | choice2 | choice3] format (max 5). Use Chinese if the user writes in Chinese. For GitHub operations, always use the gh CLI (already authenticated), never the built-in /login.",
         ]
         if resume:
             cmd += ["--resume", session_id]
