@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -67,12 +68,15 @@ def test_post_to_daemon_connection_refused() -> None:
     assert result == "error"
 
 
+@patch.dict("os.environ", {}, clear=False)
 @patch("claude_slack_bridge.hooks.sys")
 @patch("claude_slack_bridge.hooks.load_config")
 @patch("claude_slack_bridge.hooks._post_to_daemon")
 def test_run_hook_pre_tool_use_approved(
     mock_post: MagicMock, mock_config: MagicMock, mock_sys: MagicMock
 ) -> None:
+    # Ensure CLAUDE_SLACK_BRIDGE_PRINT is unset so the hook doesn't skip
+    os.environ.pop("CLAUDE_SLACK_BRIDGE_PRINT", None)
     mock_sys.stdin.read.return_value = json.dumps({
         "hook_event_name": "preToolUse", "tool_name": "Bash",
         "tool_input": {"command": "ls"}, "cwd": "/proj", "session_id": "s1",
@@ -82,12 +86,14 @@ def test_run_hook_pre_tool_use_approved(
     assert run_hook("pre-tool-use") == 0
 
 
+@patch.dict("os.environ", {}, clear=False)
 @patch("claude_slack_bridge.hooks.sys")
 @patch("claude_slack_bridge.hooks.load_config")
 @patch("claude_slack_bridge.hooks._post_to_daemon")
 def test_run_hook_pre_tool_use_rejected(
     mock_post: MagicMock, mock_config: MagicMock, mock_sys: MagicMock
 ) -> None:
+    os.environ.pop("CLAUDE_SLACK_BRIDGE_PRINT", None)
     mock_sys.stdin.read.return_value = json.dumps({
         "hook_event_name": "preToolUse", "tool_name": "Bash",
         "tool_input": {"command": "rm -rf /"}, "cwd": "/proj", "session_id": "s1",
@@ -98,12 +104,14 @@ def test_run_hook_pre_tool_use_rejected(
     assert run_hook("pre-tool-use") == 2
 
 
+@patch.dict("os.environ", {}, clear=False)
 @patch("claude_slack_bridge.hooks.sys")
 @patch("claude_slack_bridge.hooks.load_config")
 @patch("claude_slack_bridge.hooks._post_to_daemon")
 def test_run_hook_daemon_down_allows_tool(
     mock_post: MagicMock, mock_config: MagicMock, mock_sys: MagicMock
 ) -> None:
+    os.environ.pop("CLAUDE_SLACK_BRIDGE_PRINT", None)
     mock_sys.stdin.read.return_value = json.dumps({
         "hook_event_name": "preToolUse", "tool_name": "Bash",
         "tool_input": {}, "cwd": "/proj",

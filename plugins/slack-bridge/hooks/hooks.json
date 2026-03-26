@@ -1,6 +1,18 @@
 {
   "description": "Slack Bridge — sync Claude Code sessions to Slack threads",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook PreToolUse",
+            "timeout": 310000
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "",

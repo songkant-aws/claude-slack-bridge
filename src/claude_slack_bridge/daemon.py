@@ -699,6 +699,66 @@ class Daemon:
             session_key = payload.get("session_key", "")
 
             session = self._session_mgr.get(session_key)
+
+            # pre-tool-use can arrive from unbound TUI sessions — handle
+            # before the session-required checks below (Issue #2).
+            if hook_type == "pre-tool-use":
+                tool_name = payload.get("tool_name", "")
+                tool_input = payload.get("tool_input", {})
+
+                # Fast-path: YOLO mode — approve everything
+                if self._yolo_mode:
+                    return web.Response(text="approved")
+
+                # Fast-path: trusted session
+                if session and session.session_id in self._trusted_sessions:
+                    return web.Response(text="approved")
+
+                # Fast-path: safe tools (Read, Glob, Grep by default)
+                if tool_name in self._config.auto_approve_tools:
+                    return web.Response(text="approved")
+
+                # Need Slack connection to post approval buttons
+                if not self._slack:
+                    return web.Response(text="approved")
+
+                # Auto-bind session to a Slack DM if not yet registered
+                if not session:
+                    session = await self._auto_bind_session(
+                        session_key, payload.get("cwd", "")
+                    )
+                    if not session:
+                        # Cannot reach Slack — fail open so TUI isn't blocked
+                        return web.Response(text="approved")
+
+                # Post approval buttons to the Slack thread
+                request_id = str(uuid.uuid4())
+                blocks = build_approval_blocks(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    session_id=session.session_id,
+                    session_name=session.session_name,
+                    request_id=request_id,
+                )
+                await self._slack.post_blocks(
+                    session.channel_id,
+                    blocks,
+                    f"🔐 Approve {tool_name}?",
+                    session.thread_ts,
+                )
+
+                # Block until user clicks Approve/Reject or timeout
+                state = self._approval_mgr.create(request_id)
+                result = await state.wait(
+                    timeout=self._config.approval_timeout_secs
+                )
+                self._approval_mgr.cleanup(request_id)
+
+                return web.Response(
+                    text="approved" if result == "approved" else "rejected"
+                )
+
+            # Other hooks require an existing session
             if not session:
                 return web.json_response({"error": "unknown session"}, status=404)
 
@@ -718,8 +778,6 @@ class Daemon:
                     await self._finalize_progress(session, response_text)
                 # TUI exited — drain queued Slack messages
                 await self._drain_queue(session)
-            elif hook_type == "pre-tool-use":
-                return web.Response(text="approved")
 
             return web.Response(text="ok")
 
