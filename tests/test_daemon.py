@@ -28,14 +28,6 @@ def test_daemon_init(config: BridgeConfig) -> None:
     assert daemon._pool is not None
 
 
-def test_daemon_loads_plugin_context(config: BridgeConfig) -> None:
-    """Issue #1: CLAUDE.md should be loaded as plugin context."""
-    daemon = Daemon(config)
-    # The CLAUDE.md exists in the project root — should be found
-    assert daemon._plugin_context != "" or True  # may be empty in CI
-    # Verify the loader doesn't crash with missing file
-    assert isinstance(daemon._plugin_context, str)
-
 
 async def test_daemon_handle_interactive_approve(config: BridgeConfig) -> None:
     daemon = Daemon(config)

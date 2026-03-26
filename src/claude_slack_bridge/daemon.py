@@ -69,39 +69,11 @@ class Daemon:
         self._cleanup_task: asyncio.Task | None = None
         # Queued messages: session_id -> [text, ...]
         self._queued: dict[str, list[str]] = {}
-        # Plugin context (CLAUDE.md) injected into --print system prompts
-        self._plugin_context = self._load_plugin_context()
-
-    @staticmethod
-    def _load_plugin_context() -> str:
-        """Load CLAUDE.md from plugin/project directory for context injection.
-
-        Searches standard locations so --print processes get the plugin's
-        architectural context automatically (Issue #1).
-        """
-        candidates = [
-            # Installed as editable package: src/claude_slack_bridge -> src -> project root
-            Path(__file__).resolve().parent.parent.parent / "CLAUDE.md",
-            # Plugin directory (when installed as Claude Code plugin)
-            Path.home() / ".claude" / "plugins" / "slack-bridge" / "CLAUDE.md",
-            # Package data (shipped alongside source)
-            Path(__file__).resolve().parent / "CLAUDE.md",
-        ]
-        for p in candidates:
-            if p.is_file():
-                try:
-                    content = p.read_text(encoding="utf-8")
-                    logger.info("Loaded plugin context from %s (%d chars)", p, len(content))
-                    return content
-                except OSError:
-                    continue
-        logger.debug("No CLAUDE.md found for plugin context injection")
-        return ""
 
     # ── Progress message (single message, overwritten by final result) ──
 
     async def _update_progress(self, session: Session, line: str) -> None:
-        """Append a line to the progress message and update Slack."""
+        """Update progress message, overwriting previous tool_use lines."""
         sid = session.session_id
         now = time.time()
         if sid not in self._progress:
@@ -111,7 +83,7 @@ class Daemon:
             self._progress[sid] = {"msg_ts": msg_ts, "last_update": now, "lines": [line]}
         else:
             state = self._progress[sid]
-            state["lines"].append(line)
+            state["lines"] = [line]
             # Keep last 8 lines for display
             display = state["lines"][-8:]
             if now - state["last_update"] >= 0.8:
@@ -201,6 +173,10 @@ class Daemon:
                     pass
 
         elif evt.raw_type == "assistant" and evt.tool_use:
+            # Clear old tool lines when switching back from text preview
+            sid = session.session_id
+            if sid in self._progress and self._progress[sid].get("_full_text"):
+                self._progress[sid]["lines"] = []
             tool = evt.tool_use
             tool_name = tool.get("name", "")
             tool_input = tool.get("input", {})
@@ -440,7 +416,6 @@ class Daemon:
             extra_args=self._config.claude_args,
             on_event=self._on_stream_event,
             on_exit=self._on_process_exit,
-            plugin_context=self._plugin_context,
         )
 
     async def _handle_thread_reply(self, event: dict, thread_ts: str) -> None:
@@ -485,7 +460,6 @@ class Daemon:
             extra_args=self._config.claude_args,
             on_event=self._on_stream_event,
             on_exit=self._on_process_exit,
-            plugin_context=self._plugin_context,
         )
 
     async def _auto_bind_session(self, session_key: str, cwd: str) -> Session | None:

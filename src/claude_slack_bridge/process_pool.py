@@ -18,6 +18,7 @@ class ClaudeProcess:
     session_id: str
     process: asyncio.subprocess.Process
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
+    _init_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def alive(self) -> bool:
@@ -70,30 +71,18 @@ class ProcessPool:
         extra_args: list[str] | None = None,
         on_event: OnEvent | None = None,
         on_exit: OnExit | None = None,
-        plugin_context: str = "",
     ) -> ClaudeProcess:
-        """Start a claude --print process for a session.
-
-        Args:
-            plugin_context: Extra context (e.g. CLAUDE.md) appended to the system prompt.
-        """
+        """Start a claude --print process for a session."""
         # Kill existing process for this session
         if session_id in self._processes:
             logger.info("Killing existing process for session %s", session_id)
             await self._processes[session_id].terminate()
 
         system_prompt = (
-            f"You are a Claude Code agent connected to Slack via Claude Slack Bridge. "
-            f"Your session ID is: {session_id}. "
-            f"Users interact with you through Slack threads. Be concise — Slack messages "
-            f"should be short and readable. When presenting choices, end with "
-            f"[OPTIONS: choice1 | choice2 | choice3] format (max 5). "
-            f"Use Chinese if the user writes in Chinese. "
-            f"For GitHub operations, always use the gh CLI (already authenticated), "
-            f"never the built-in /login."
+            f"Session {session_id}. Slack thread — be concise. "
+            f"End choices with [OPTIONS: a | b | c]. "
+            f"Use Chinese if user writes Chinese. Use gh CLI for GitHub."
         )
-        if plugin_context:
-            system_prompt += f"\n\n{plugin_context}"
 
         cmd = [
             "claude", "--print",
@@ -124,6 +113,7 @@ class ProcessPool:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            limit=10 * 1024 * 1024,  # 10MB — stream-json lines can be huge on resume
         )
 
         cp = ClaudeProcess(session_id=session_id, process=proc)
@@ -136,7 +126,10 @@ class ProcessPool:
 
         # Wait for init event before sending first message
         if prompt:
-            await asyncio.sleep(2)
+            try:
+                await asyncio.wait_for(cp._init_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("Claude process %s did not send init event in 30s", session_id)
             if cp.alive:
                 await cp.send_message(prompt)
             else:
@@ -157,9 +150,12 @@ class ProcessPool:
                 if not line:
                     break
                 evt = parse_line(line.decode("utf-8", errors="replace"))
-                if evt and on_event:
-                    # Fire-and-forget: don't block stdout reading on Slack API
-                    asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))
+                if evt:
+                    if evt.raw_type == "system" and evt.subtype == "init":
+                        cp._init_event.set()
+                    if on_event:
+                        # Fire-and-forget: don't block stdout reading on Slack API
+                        asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))
         except asyncio.CancelledError:
             return
         finally:
