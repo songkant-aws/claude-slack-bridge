@@ -551,11 +551,15 @@ class Daemon:
                     cp = self._pool.get(session.session_id)
                     if cp:
                         await cp.send_message(value)
+                    # Replace buttons with selected choice so user can see what they picked
                     if self._slack and msg_ts:
                         try:
-                            await self._slack.web.chat_delete(channel=channel_id, ts=msg_ts)
+                            await self._slack.web.chat_update(
+                                channel=channel_id, ts=msg_ts,
+                                text=f"✅ Selected: *{value}*", blocks=[],
+                            )
                         except Exception:
-                            logger.debug("Failed to delete options message", exc_info=True)
+                            logger.debug("Failed to update options message", exc_info=True)
         elif action_id == "trust_session":
             # value is session_id — trust this session and approve only its pending requests
             self._trusted_sessions.add(value)
