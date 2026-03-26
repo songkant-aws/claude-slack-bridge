@@ -18,6 +18,7 @@ class ClaudeProcess:
     session_id: str
     process: asyncio.subprocess.Process
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
+    _init_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def alive(self) -> bool:
@@ -136,7 +137,10 @@ class ProcessPool:
 
         # Wait for init event before sending first message
         if prompt:
-            await asyncio.sleep(2)
+            try:
+                await asyncio.wait_for(cp._init_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("Claude process %s did not send init event in 30s", session_id)
             if cp.alive:
                 await cp.send_message(prompt)
             else:
@@ -157,9 +161,12 @@ class ProcessPool:
                 if not line:
                     break
                 evt = parse_line(line.decode("utf-8", errors="replace"))
-                if evt and on_event:
-                    # Fire-and-forget: don't block stdout reading on Slack API
-                    asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))
+                if evt:
+                    if evt.raw_type == "system" and evt.subtype == "init":
+                        cp._init_event.set()
+                    if on_event:
+                        # Fire-and-forget: don't block stdout reading on Slack API
+                        asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))
         except asyncio.CancelledError:
             return
         finally:
