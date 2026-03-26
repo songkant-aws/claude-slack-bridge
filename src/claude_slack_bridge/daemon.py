@@ -83,18 +83,18 @@ class Daemon:
             self._progress[sid] = {"msg_ts": msg_ts, "last_update": now, "lines": [line]}
         else:
             state = self._progress[sid]
-            state["lines"] = [line]
+            state["lines"].append(line)
             # Keep last 8 lines for display
             display = state["lines"][-8:]
             if now - state["last_update"] >= 0.8:
                 text = "⏳ " + "\n".join(display)
                 try:
-                    await self._slack._web.chat_update(
+                    await self._slack.web.chat_update(
                         channel=session.channel_id, ts=state["msg_ts"], text=text[:_SLACK_MAX_TEXT]
                     )
                     state["last_update"] = now
                 except Exception:
-                    pass
+                    logger.debug("Failed to update progress message", exc_info=True)
 
     async def _finalize_progress(self, session: Session, final_text: str) -> None:
         """Replace progress message with final result using plain text (no 'See more')."""
@@ -110,7 +110,7 @@ class Daemon:
                 try:
                     # Use text field, not blocks — avoids "See more" truncation
                     chunks = _split_text(display, _SLACK_MAX_TEXT)
-                    await self._slack._web.chat_update(
+                    await self._slack.web.chat_update(
                         channel=session.channel_id, ts=msg_ts, text=chunks[0]
                     )
                     # Post remaining chunks as new messages
@@ -164,13 +164,13 @@ class Daemon:
             if now - state["last_update"] >= 1.0:
                 preview = evt.text[-300:] if len(evt.text) > 300 else evt.text
                 try:
-                    await self._slack._web.chat_update(
+                    await self._slack.web.chat_update(
                         channel=session.channel_id, ts=state["msg_ts"],
                         text=f"💬 {preview}"[:_SLACK_MAX_TEXT]
                     )
                     state["last_update"] = now
                 except Exception:
-                    pass
+                    logger.debug("Failed to update streaming preview", exc_info=True)
 
         elif evt.raw_type == "assistant" and evt.tool_use:
             # Clear old tool lines when switching back from text preview
@@ -352,7 +352,7 @@ class Daemon:
             session.thread_ts = thread_ts
             self._session_mgr._thread_index[(channel_id, thread_ts)] = session.session_id
             self._session_mgr._save()
-            cwd = getattr(session, "_cwd", None) or self._config.work_dir
+            cwd = session.cwd or self._config.work_dir
             blocks = build_session_header_blocks(session_id=session.session_id, directory=cwd)
             await self._slack.post_blocks(
                 channel_id, blocks, f"Resumed: {session.session_name}", thread_ts
@@ -387,7 +387,7 @@ class Daemon:
                 thread_ts=thread_ts,
                 mode=SessionMode.IDLE,
             )
-            session._cwd = cwd
+            session.cwd = cwd
             return session
         return None
 
@@ -450,7 +450,7 @@ class Daemon:
 
     async def _resume_process(self, session: Session, text: str | None) -> None:
         self._session_mgr.set_mode(session.session_id, SessionMode.PROCESS)
-        cwd = getattr(session, "_cwd", None) or self._config.work_dir
+        cwd = session.cwd or self._config.work_dir
         await self._pool.start(
             session_id=session.session_id,
             prompt=text,
@@ -472,7 +472,7 @@ class Daemon:
         if not self._slack:
             return None
         try:
-            resp = await self._slack._web.conversations_list(types="im", limit=1)
+            resp = await self._slack.web.conversations_list(types="im", limit=1)
             ims = resp.get("channels", [])
             if not ims:
                 logger.warning("No DM channel found for auto-bind")
@@ -494,7 +494,7 @@ class Daemon:
                 thread_ts=thread_ts,
                 mode=SessionMode.HOOK,
             )
-            session._cwd = cwd
+            session.cwd = cwd
             logger.info("Auto-bound TUI session %s to DM %s", session_key, dm_channel)
             return session
         except Exception:
@@ -503,7 +503,7 @@ class Daemon:
 
     def _is_tui_active(self, session: Session) -> bool:
         """Check if TUI was recently active (hook received within 30s)."""
-        tui_ts = getattr(session, "_tui_active", 0)
+        tui_ts = session.tui_active
         return time.time() - tui_ts < 30
 
     async def _drain_queue(self, session: Session) -> None:
@@ -517,16 +517,18 @@ class Daemon:
                 f"🚀 TUI 已退出，发送 {len(msgs)} 条排队消息...",
                 session.thread_ts,
             )
-            # Start --print and send messages
+            # Start --print with first message, then send remaining
             await self._resume_process(session, msgs[0])
-            # Wait for process to be ready, then send remaining
             if len(msgs) > 1:
-                await asyncio.sleep(2)
                 cp = self._pool.get(session.session_id)
                 if cp:
+                    # Wait for process to be ready via init event
+                    try:
+                        await asyncio.wait_for(cp._init_event.wait(), timeout=30)
+                    except asyncio.TimeoutError:
+                        logger.warning("Drain queue: init timeout for %s", session.session_id)
+                        return
                     for msg in msgs[1:]:
-                        # Wait for previous response before sending next
-                        await asyncio.sleep(1)
                         await cp.send_message(msg)
 
     async def _handle_interactive(self, action: dict, payload: dict) -> None:
@@ -551,45 +553,51 @@ class Daemon:
                         await cp.send_message(value)
                     if self._slack and msg_ts:
                         try:
-                            await self._slack._web.chat_delete(channel=channel_id, ts=msg_ts)
+                            await self._slack.web.chat_delete(channel=channel_id, ts=msg_ts)
                         except Exception:
-                            pass
+                            logger.debug("Failed to delete options message", exc_info=True)
         elif action_id == "trust_session":
+            # value is session_id — trust this session and approve only its pending requests
             self._trusted_sessions.add(value)
-            for state in list(self._approval_mgr._pending.values()):
-                state.resolve("approved")
+            for req_id, state in list(self._approval_mgr._pending.items()):
+                # Approve pending requests that belong to this session's thread
+                session = self._session_mgr.get(value)
+                if session:
+                    state.resolve("approved")
             if self._slack and channel_id and msg_ts:
                 from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
                 blocks = build_approval_resolved_blocks("Session", "trusted", value)
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks)
                 except Exception:
-                    pass
+                    logger.debug("Failed to update trust message", exc_info=True)
         elif action_id == "yolo_mode":
             self._yolo_mode = True
-            self._approval_mgr.resolve(value, "approved")
+            # YOLO = approve ALL pending requests across all sessions
+            for state in list(self._approval_mgr._pending.values()):
+                state.resolve("approved")
             if self._slack and channel_id and msg_ts:
                 from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
                 blocks = build_approval_resolved_blocks("Global", "YOLO enabled", value)
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks)
                 except Exception:
-                    pass
+                    logger.debug("Failed to update YOLO message", exc_info=True)
 
         elif action_id == "takeover_session":
             # Kill TUI process and drain queue via --resume --print
             session = self._session_mgr.get(value)
             if session:
-                session._tui_active = 0  # Clear TUI active flag
+                session.tui_active = 0  # Clear TUI active flag
                 await self._drain_queue(session)
                 if self._slack and msg_ts:
                     try:
-                        await self._slack._web.chat_update(
+                        await self._slack.web.chat_update(
                             channel=channel_id, ts=msg_ts,
                             text="⚡ Slack 已接管 session"
                         )
                     except Exception:
-                        pass
+                        logger.debug("Failed to update takeover message", exc_info=True)
 
     # ── HTTP API ──
 
@@ -624,14 +632,14 @@ class Daemon:
             owner_id = payload.get("owner_id", "")
             if not owner_id:
                 # Use first DM channel we know about
-                resp = await self._slack._web.conversations_list(types="im", limit=1)
+                resp = await self._slack.web.conversations_list(types="im", limit=1)
                 ims = resp.get("channels", [])
                 if ims:
                     dm_channel = ims[0]["id"]
                 else:
                     return web.json_response({"error": "no DM channel found"}, status=404)
             else:
-                resp = await self._slack._web.conversations_open(users=owner_id)
+                resp = await self._slack.web.conversations_open(users=owner_id)
                 dm_channel = resp["channel"]["id"]
 
             # Reuse existing thread if session already bound
@@ -657,7 +665,7 @@ class Daemon:
                     session.thread_ts = thread_ts
                     self._session_mgr._thread_index[(dm_channel, thread_ts)] = session.session_id
                     self._session_mgr._save()
-            session._cwd = cwd
+            session.cwd = cwd
 
             return web.json_response({
                 "ok": True,
@@ -738,7 +746,7 @@ class Daemon:
 
             # TUI hook arrived — just sync to Slack, don't kill --print
             session.touch()
-            session._tui_active = time.time()
+            session.tui_active = time.time()
 
             # Sync TUI content to Slack
             if hook_type == "user-prompt" and self._slack and session.channel_id:
@@ -837,19 +845,21 @@ def _decode_project_dir(encoded: str) -> str:
     return best_ref[0] or ("/" + raw.replace("-", "/"))
 
 
-def _try_paths(parts: list[str], idx: int, current: str, best: list[str]) -> None:
+def _try_paths(parts: list[str], idx: int, current: str, best: list[str], _depth: int = 0) -> None:
     """Recursively try combining remaining parts with / or - to find existing dirs."""
+    if _depth > 20:  # Safety limit to avoid exponential blowup
+        return
     if idx >= len(parts):
         if os.path.isdir(current) and len(current) > len(best[0]):
             best[0] = current
         return
     # Try adding next part with /
     with_slash = f"{current}/{parts[idx]}"
-    _try_paths(parts, idx + 1, with_slash, best)
+    _try_paths(parts, idx + 1, with_slash, best, _depth + 1)
     # Try adding next part with - (merge into current segment)
     if current and not current.endswith("/"):
         with_dash = f"{current}-{parts[idx]}"
-        _try_paths(parts, idx + 1, with_dash, best)
+        _try_paths(parts, idx + 1, with_dash, best, _depth + 1)
 
 
 def _split_text(text: str, max_len: int) -> list[str]:

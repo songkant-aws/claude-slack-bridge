@@ -95,5 +95,7 @@ class SessionRegistry:
             return
         raw = json.loads(self._path.read_text())
         self._sessions = {}
+        known = {f.name for f in SessionMapping.__dataclass_fields__.values()}
         for sid, d in raw.items():
-            self._sessions[sid] = SessionMapping(**d)
+            clean = {k: v for k, v in d.items() if k in known}
+            self._sessions[sid] = SessionMapping(**clean)

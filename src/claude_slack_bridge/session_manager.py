@@ -24,6 +24,8 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     status: str = "active"
+    cwd: str = ""  # working directory for claude processes
+    tui_active: float = 0  # timestamp of last TUI hook activity
 
     def touch(self) -> None:
         self.last_active = time.time()

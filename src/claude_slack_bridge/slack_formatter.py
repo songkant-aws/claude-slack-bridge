@@ -15,13 +15,25 @@ _MD_IMG = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 
 
 def md_to_mrkdwn(text: str) -> str:
-    """Convert Markdown to Slack mrkdwn format."""
-    text = _MD_IMG.sub(r"<\2|\1>", text)          # images → links
-    text = _MD_LINK.sub(r"<\2|\1>", text)         # [text](url) → <url|text>
-    text = _MD_CODE_LANG.sub("```\n", text)       # ```python → ```
-    text = _MD_BOLD.sub(r"*\1*", text)            # **bold** → *bold*
-    text = _MD_HEADER.sub(r"*\1*", text)          # # Header → *Header*
-    return text
+    """Convert Markdown to Slack mrkdwn format.
+
+    Preserves content inside code blocks (``` ... ```) from being transformed.
+    """
+    # Split on code fences, preserving them
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    result = []
+    for i, part in enumerate(parts):
+        if part.startswith("```"):
+            # Inside code block — only strip language identifier
+            result.append(_MD_CODE_LANG.sub("```\n", part))
+        else:
+            # Outside code block — apply all conversions
+            part = _MD_IMG.sub(r"<\2|\1>", part)       # images → links
+            part = _MD_LINK.sub(r"<\2|\1>", part)      # [text](url) → <url|text>
+            part = _MD_BOLD.sub(r"*\1*", part)         # **bold** → *bold*
+            part = _MD_HEADER.sub(r"*\1*", part)       # # Header → *Header*
+            result.append(part)
+    return "".join(result)
 
 
 def extract_options(text: str) -> tuple[str, list[str]]:

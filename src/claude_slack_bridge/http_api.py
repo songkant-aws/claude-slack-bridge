@@ -1,3 +1,9 @@
+"""Legacy hook-only HTTP API.
+
+DEPRECATED: This module predates the dual-mode daemon (daemon.py) which implements
+a superset of these endpoints inline. Kept for backward compatibility but new
+development should go into daemon.py's _create_http_app().
+"""
 from __future__ import annotations
 
 import logging
