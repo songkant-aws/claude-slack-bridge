@@ -158,10 +158,8 @@ class ProcessPool:
                     break
                 evt = parse_line(line.decode("utf-8", errors="replace"))
                 if evt and on_event:
-                    try:
-                        await on_event(cp.session_id, evt)
-                    except Exception:
-                        logger.exception("Error in on_event callback")
+                    # Fire-and-forget: don't block stdout reading on Slack API
+                    asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))
         except asyncio.CancelledError:
             return
         finally:
@@ -179,6 +177,13 @@ class ProcessPool:
         if cp and cp.alive:
             return cp
         return None
+
+    @staticmethod
+    async def _safe_on_event(on_event: OnEvent, session_id: str, evt: StreamEvent) -> None:
+        try:
+            await on_event(session_id, evt)
+        except Exception:
+            logger.exception("Error in on_event callback")
 
     async def terminate(self, session_id: str) -> None:
         if cp := self._processes.get(session_id):
