@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
@@ -19,6 +20,8 @@ class ClaudeProcess:
     process: asyncio.subprocess.Process
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
     _init_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    started_at: float = field(default_factory=time.time)
+    init_at: float = 0
 
     @property
     def alive(self) -> bool:
@@ -119,6 +122,9 @@ class ProcessPool:
         cp = ClaudeProcess(session_id=session_id, process=proc)
         self._processes[session_id] = cp
 
+        # Drain stderr so pipe buffer never fills and blocks the process
+        asyncio.create_task(self._drain_stderr(cp))
+
         # Start stdout reader
         cp._reader_task = asyncio.create_task(
             self._read_stdout(cp, on_event, on_exit)
@@ -129,13 +135,26 @@ class ProcessPool:
             try:
                 await asyncio.wait_for(cp._init_event.wait(), timeout=30)
             except asyncio.TimeoutError:
-                logger.error("Claude process %s did not send init event in 30s", session_id)
+                logger.error("Claude process %s did not send init event in 30s, killing", session_id)
+                await cp.terminate()
+                return cp
             if cp.alive:
                 await cp.send_message(prompt)
             else:
                 logger.error("Claude process died before sending prompt")
 
         return cp
+
+    @staticmethod
+    async def _drain_stderr(cp: ClaudeProcess) -> None:
+        """Consume stderr to prevent pipe buffer from blocking the process."""
+        try:
+            while cp.process.stderr:
+                line = await cp.process.stderr.readline()
+                if not line:
+                    break
+        except (asyncio.CancelledError, Exception):
+            pass
 
     async def _read_stdout(
         self,
@@ -153,6 +172,7 @@ class ProcessPool:
                 if evt:
                     if evt.raw_type == "system" and evt.subtype == "init":
                         cp._init_event.set()
+                        cp.init_at = time.time()
                     if on_event:
                         # Fire-and-forget: don't block stdout reading on Slack API
                         asyncio.create_task(self._safe_on_event(on_event, cp.session_id, evt))

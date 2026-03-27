@@ -69,6 +69,8 @@ class Daemon:
         self._cleanup_task: asyncio.Task | None = None
         # Queued messages: session_id -> [text, ...]
         self._queued: dict[str, list[str]] = {}
+        # Sessions with TUI→Slack sync muted
+        self._tui_sync_muted: set[str] = set()
 
     # ── Progress message (single message, overwritten by final result) ──
 
@@ -435,6 +437,14 @@ class Daemon:
             self._trusted_sessions.discard(session.session_id)
             await self._slack.post_text(channel_id, "🔒 YOLO/Trust mode disabled", thread_ts)
             return
+        if lower == "sync off":
+            self._tui_sync_muted.add(session.session_id)
+            await self._slack.post_text(channel_id, "🔇 TUI sync muted for this session", thread_ts)
+            return
+        if lower == "sync on":
+            self._tui_sync_muted.discard(session.session_id)
+            await self._slack.post_text(channel_id, "🔊 TUI sync resumed for this session", thread_ts)
+            return
 
         if session.mode == SessionMode.PROCESS.value:
             cp = self._pool.get(session.session_id)
@@ -541,8 +551,22 @@ class Daemon:
 
         if action_id == "approve_tool":
             self._approval_mgr.resolve(value, "approved")
+            if self._slack and channel_id and msg_ts:
+                from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
+                blocks = build_approval_resolved_blocks("Tool", "approved", value)
+                try:
+                    await self._slack.update_blocks(channel_id, msg_ts, blocks)
+                except Exception:
+                    logger.debug("Failed to update approve message", exc_info=True)
         elif action_id == "reject_tool":
             self._approval_mgr.resolve(value, "rejected")
+            if self._slack and channel_id and msg_ts:
+                from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
+                blocks = build_approval_resolved_blocks("Tool", "rejected", value)
+                try:
+                    await self._slack.update_blocks(channel_id, msg_ts, blocks)
+                except Exception:
+                    logger.debug("Failed to update reject message", exc_info=True)
         elif action_id.startswith(OPTIONS_ACTION_PREFIX):
             thread_ts = msg.get("thread_ts", msg_ts)
             if channel_id and thread_ts:
@@ -561,28 +585,25 @@ class Daemon:
                         except Exception:
                             logger.debug("Failed to update options message", exc_info=True)
         elif action_id == "trust_session":
-            # value is session_id — trust this session and approve only its pending requests
             self._trusted_sessions.add(value)
             for req_id, state in list(self._approval_mgr._pending.items()):
-                # Approve pending requests that belong to this session's thread
                 session = self._session_mgr.get(value)
                 if session:
                     state.resolve("approved")
             if self._slack and channel_id and msg_ts:
                 from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
-                blocks = build_approval_resolved_blocks("Session", "trusted", value)
+                blocks = build_approval_resolved_blocks("Session", "approved", value)
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks)
                 except Exception:
                     logger.debug("Failed to update trust message", exc_info=True)
         elif action_id == "yolo_mode":
             self._yolo_mode = True
-            # YOLO = approve ALL pending requests across all sessions
             for state in list(self._approval_mgr._pending.values()):
                 state.resolve("approved")
             if self._slack and channel_id and msg_ts:
                 from claude_slack_bridge.slack_formatter import build_approval_resolved_blocks
-                blocks = build_approval_resolved_blocks("Global", "YOLO enabled", value)
+                blocks = build_approval_resolved_blocks("Global", "approved", value)
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks)
                 except Exception:
@@ -614,12 +635,33 @@ class Daemon:
 
         @routes.get("/sessions")
         async def list_sessions(req: web.Request) -> web.Response:
+            import time as _t
+            now = _t.time()
             active = self._session_mgr.list_active()
-            return web.json_response([
-                {"session_id": s.session_id, "name": s.session_name,
-                 "mode": s.mode, "channel_id": s.channel_id}
-                for s in active
-            ])
+            result = []
+            for s in active:
+                info: dict = {
+                    "session_id": s.session_id,
+                    "name": s.session_name,
+                    "mode": s.mode,
+                    "channel_id": s.channel_id,
+                    "thread_ts": s.thread_ts,
+                    "cwd": s.cwd,
+                    "created_at": s.created_at,
+                    "last_active": s.last_active,
+                    "age_secs": int(now - s.created_at),
+                    "idle_secs": int(now - s.last_active),
+                    "muted": s.session_id in self._tui_sync_muted,
+                    "trusted": s.session_id in self._trusted_sessions,
+                }
+                cp = self._pool.get(s.session_id)
+                if cp:
+                    info["pid"] = cp.process.pid
+                    info["process_started_at"] = cp.started_at
+                    if cp.init_at:
+                        info["init_duration_ms"] = int((cp.init_at - cp.started_at) * 1000)
+                result.append(info)
+            return web.json_response({"yolo": self._yolo_mode, "sessions": result})
 
         @routes.post("/sessions/bind")
         async def bind_session(req: web.Request) -> web.Response:
@@ -677,6 +719,17 @@ class Daemon:
                 "thread_ts": thread_ts,
                 "session_id": session_id,
             })
+
+        @routes.post("/sessions/{session_id}/mute")
+        async def mute_session(req: web.Request) -> web.Response:
+            sid = req.match_info["session_id"]
+            payload = await req.json()
+            muted = payload.get("muted", True)
+            if muted:
+                self._tui_sync_muted.add(sid)
+            else:
+                self._tui_sync_muted.discard(sid)
+            return web.json_response({"ok": True, "muted": muted})
 
         @routes.post("/hooks/{hook_type}")
         async def hook_handler(req: web.Request) -> web.Response:
@@ -752,16 +805,19 @@ class Daemon:
             session.touch()
             session.tui_active = time.time()
 
-            # Sync TUI content to Slack
-            if hook_type == "user-prompt" and self._slack and session.channel_id:
-                blocks = build_user_prompt_blocks(payload.get("prompt", ""))
-                await self._slack.post_blocks(
-                    session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
-                )
-            elif hook_type == "stop" and self._slack and session.channel_id:
-                response_text = payload.get("response", "")
-                if response_text:
-                    await self._finalize_progress(session, response_text)
+            # Sync TUI content to Slack (unless muted)
+            if session.session_id not in self._tui_sync_muted:
+                if hook_type == "user-prompt" and self._slack and session.channel_id:
+                    blocks = build_user_prompt_blocks(payload.get("prompt", ""))
+                    await self._slack.post_blocks(
+                        session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
+                    )
+                elif hook_type == "stop" and self._slack and session.channel_id:
+                    response_text = payload.get("response", "")
+                    if response_text:
+                        await self._finalize_progress(session, response_text)
+
+            if hook_type == "stop":
                 # TUI exited — drain queued Slack messages
                 await self._drain_queue(session)
 
