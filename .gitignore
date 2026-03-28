@@ -5,7 +5,7 @@ dist/
 build/
 .eggs/
 .pytest_cache/
-.venv/
+.venv*/
 
 # Secrets — never commit
 .env

@@ -159,7 +159,12 @@ class Daemon:
                 )
                 self._progress[sid] = {"msg_ts": msg_ts, "last_update": 0, "lines": []}
             state = self._progress[sid]
-            state["_full_text"] = evt.text
+            # Accumulate text across multiple assistant messages
+            prev = state.get("_full_text", "")
+            if prev and not evt.text.startswith(prev):
+                state["_full_text"] = prev + "\n\n" + evt.text
+            else:
+                state["_full_text"] = evt.text
 
             # Update with streaming preview
             now = time.time()
@@ -449,7 +454,9 @@ class Daemon:
         if session.mode == SessionMode.PROCESS.value:
             cp = self._pool.get(session.session_id)
             if cp:
-                await cp.send_message(text)
+                # Kill running process and resume with new message
+                # (--input-format stream-json broken in CC 2.1.86+)
+                await self._resume_process(session, text)
             else:
                 await self._resume_process(session, text)
         elif self._is_tui_active(session):
@@ -527,19 +534,21 @@ class Daemon:
                 f"🚀 TUI 已退出，发送 {len(msgs)} 条排队消息...",
                 session.thread_ts,
             )
-            # Start --print with first message, then send remaining
+            # Start --print with first message, then resume for remaining
             await self._resume_process(session, msgs[0])
-            if len(msgs) > 1:
+            for msg in msgs[1:]:
+                # Wait for previous to finish before sending next
                 cp = self._pool.get(session.session_id)
                 if cp:
-                    # Wait for process to be ready via init event
                     try:
                         await asyncio.wait_for(cp._init_event.wait(), timeout=30)
                     except asyncio.TimeoutError:
                         logger.warning("Drain queue: init timeout for %s", session.session_id)
                         return
-                    for msg in msgs[1:]:
-                        await cp.send_message(msg)
+                    # Wait for process to finish before resuming with next msg
+                    if cp._reader_task:
+                        await cp._reader_task
+                await self._resume_process(session, msg)
 
     async def _handle_interactive(self, action: dict, payload: dict) -> None:
         action_id = action.get("action_id", "")
@@ -572,9 +581,7 @@ class Daemon:
             if channel_id and thread_ts:
                 session = self._session_mgr.find_by_thread(channel_id, thread_ts)
                 if session:
-                    cp = self._pool.get(session.session_id)
-                    if cp:
-                        await cp.send_message(value)
+                    await self._resume_process(session, value)
                     # Replace buttons with selected choice so user can see what they picked
                     if self._slack and msg_ts:
                         try:
@@ -833,6 +840,29 @@ class Daemon:
         _setup_logging(self._config)
         logger.info("Starting Bridge Daemon on port %d", self._config.daemon_port)
 
+        # Log unhandled exceptions in fire-and-forget tasks
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(self._loop_exception_handler)
+
+        try:
+            await self._start_services()
+
+            pid_file = self._config.config_dir / "daemon.pid"
+            pid_file.write_text(str(os.getpid()))
+
+            stop_event = asyncio.Event()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+            await stop_event.wait()
+
+            logger.info("Shutting down...")
+        except Exception:
+            logger.critical("Daemon crashed", exc_info=True)
+        finally:
+            await self.stop()
+
+    async def _start_services(self) -> None:
+        """Start HTTP, Slack Socket Mode, and cleanup loop."""
         self._slack = SlackClient(self._config.slack_bot_token)
 
         try:
@@ -867,17 +897,14 @@ class Daemon:
         # Start cleanup loop
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
-        pid_file = self._config.config_dir / "daemon.pid"
-        pid_file.write_text(str(os.getpid()))
-
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop_event.set)
-        await stop_event.wait()
-
-        logger.info("Shutting down...")
-        await self.stop()
+    @staticmethod
+    def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        msg = context.get("message", "Unhandled async exception")
+        if exc:
+            logger.error("%s: %s", msg, exc, exc_info=exc)
+        else:
+            logger.error("Async error: %s", msg)
 
     async def stop(self) -> None:
         if self._cleanup_task:

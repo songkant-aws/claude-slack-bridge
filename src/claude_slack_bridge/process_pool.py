@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -32,7 +33,6 @@ class ClaudeProcess:
         if not self.alive or not self.process.stdin:
             logger.warning("Cannot send to dead process %s", self.session_id)
             return
-        import json
         line = json.dumps({
             "type": "user",
             "message": {"role": "user", "content": text},
@@ -90,7 +90,6 @@ class ProcessPool:
         cmd = [
             "claude", "--print",
             "--output-format", "stream-json",
-            "--input-format", "stream-json",
             "--verbose",
             "--setting-sources", "user,project,local",
             "--system-prompt", system_prompt,
@@ -105,6 +104,9 @@ class ProcessPool:
             cmd += ["--name", name]
         if extra_args:
             cmd += extra_args
+        # Prompt as positional arg; use -- to prevent --tools from swallowing it
+        if prompt:
+            cmd += ["--", prompt]
 
         logger.info("Starting claude process: %s", " ".join(cmd))
 
@@ -130,19 +132,6 @@ class ProcessPool:
             self._read_stdout(cp, on_event, on_exit)
         )
 
-        # Wait for init event before sending first message
-        if prompt:
-            try:
-                await asyncio.wait_for(cp._init_event.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                logger.error("Claude process %s did not send init event in 30s, killing", session_id)
-                await cp.terminate()
-                return cp
-            if cp.alive:
-                await cp.send_message(prompt)
-            else:
-                logger.error("Claude process died before sending prompt")
-
         return cp
 
     @staticmethod
@@ -165,7 +154,12 @@ class ProcessPool:
         """Read stdout line by line, parse events, invoke callback."""
         try:
             while cp.process.stdout:
-                line = await cp.process.stdout.readline()
+                try:
+                    line = await cp.process.stdout.readline()
+                except ValueError:
+                    # LimitOverrunError (line > buffer limit) — skip this line
+                    logger.warning("Skipping oversized stdout line for %s", cp.session_id)
+                    continue
                 if not line:
                     break
                 evt = parse_line(line.decode("utf-8", errors="replace"))
