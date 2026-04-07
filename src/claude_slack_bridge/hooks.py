@@ -21,6 +21,7 @@ def _build_hook_payload(event_type: str, stdin_json: dict) -> dict:
     if event_type in ("pre-tool-use", "post-tool-use"):
         payload["tool_name"] = stdin_json.get("tool_name", "")
         payload["tool_input"] = stdin_json.get("tool_input", {})
+        payload["tool_use_id"] = stdin_json.get("tool_use_id", "")
     if event_type == "post-tool-use":
         payload["tool_output"] = stdin_json.get("tool_output", "")
         payload["duration_ms"] = stdin_json.get("duration_ms", 0)
@@ -28,6 +29,11 @@ def _build_hook_payload(event_type: str, stdin_json: dict) -> dict:
         payload["prompt"] = stdin_json.get("prompt", "")
     if event_type == "stop":
         payload["response"] = stdin_json.get("last_assistant_message", "") or stdin_json.get("response", "")
+    if event_type == "notification":
+        payload["notification_type"] = stdin_json.get("notification_type", "")
+        payload["message"] = stdin_json.get("message", "")
+    if event_type == "pre-compact":
+        payload["compact_type"] = stdin_json.get("compact_type", "auto")
 
     return payload
 

@@ -16,6 +16,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 
 from claude_slack_bridge.approval import ApprovalManager
 from claude_slack_bridge.config import BridgeConfig
+from claude_slack_bridge.conversation_parser import ConversationParser, SessionFileWatcher
 from claude_slack_bridge.process_pool import ProcessPool
 from claude_slack_bridge.session_manager import Session, SessionManager, SessionMode
 from claude_slack_bridge.slack_client import SlackClient
@@ -71,6 +72,11 @@ class Daemon:
         self._queued: dict[str, list[str]] = {}
         # Sessions with TUI→Slack sync muted
         self._tui_sync_muted: set[str] = set()
+        # Conversation parser (Channel 2: JSONL file monitoring)
+        self._conv_parser = ConversationParser()
+        self._file_watcher = SessionFileWatcher(
+            self._conv_parser, on_new_messages=self._on_jsonl_messages
+        )
 
     # ── Progress message (single message, overwritten by final result) ──
 
@@ -141,6 +147,34 @@ class Daemon:
             await self._slack.post_blocks(
                 session.channel_id, blocks, "Choose an option", session.thread_ts
             )
+
+    # ── JSONL file monitoring (Channel 2) ──
+
+    async def _on_jsonl_messages(self, session_id: str, messages) -> None:
+        """Called when new messages are found in JSONL file by the file watcher."""
+        session = self._session_mgr.get(session_id)
+        if not session or not self._slack:
+            return
+        if session.session_id in self._tui_sync_muted:
+            return
+        # Only sync JSONL content for HOOK mode (TUI active) sessions
+        # PROCESS mode sessions already get content via stream events
+        if session.mode != SessionMode.HOOK.value:
+            return
+
+        for msg in messages:
+            if msg.role == "assistant" and msg.text:
+                # Assistant text from JSONL — update progress or post
+                await self._update_progress(session, f"💬 {msg.text[:200]}")
+            elif msg.role == "tool_use":
+                detail = ""
+                if msg.tool_name == "Bash":
+                    detail = msg.tool_input.get("command", "")[:60]
+                elif msg.tool_name in ("Read", "Write", "Edit"):
+                    detail = msg.tool_input.get("file_path", "")[:60]
+                else:
+                    detail = msg.tool_name
+                await self._update_progress(session, f"🔧 {msg.tool_name}: {detail}")
 
     # ── Stream event handler (PROCESS mode) ──
 
@@ -812,12 +846,27 @@ class Daemon:
             session.touch()
             session.tui_active = time.time()
 
+            # Start JSONL watcher if not already watching
+            cwd = payload.get("cwd", "")
+            if cwd and session.session_id not in self._file_watcher._watching:
+                self._file_watcher.watch(session.session_id, cwd)
+
             # Sync TUI content to Slack (unless muted)
             if session.session_id not in self._tui_sync_muted:
                 if hook_type == "user-prompt" and self._slack and session.channel_id:
                     blocks = build_user_prompt_blocks(payload.get("prompt", ""))
                     await self._slack.post_blocks(
                         session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
+                    )
+                elif hook_type == "post-tool-use" and self._slack and session.channel_id:
+                    tool_name = payload.get("tool_name", "")
+                    tool_input = payload.get("tool_input", {})
+                    tool_output = payload.get("tool_output", "")
+                    duration_ms = payload.get("duration_ms", 0)
+                    from claude_slack_bridge.slack_formatter import build_post_tool_blocks
+                    blocks = build_post_tool_blocks(tool_name, tool_input, tool_output, duration_ms)
+                    await self._slack.post_blocks(
+                        session.channel_id, blocks, f"Tool: {tool_name}", session.thread_ts
                     )
                 elif hook_type == "stop" and self._slack and session.channel_id:
                     response_text = payload.get("response", "")
@@ -828,6 +877,111 @@ class Daemon:
                 # TUI exited — drain queued Slack messages
                 await self._drain_queue(session)
 
+            return web.Response(text="ok")
+
+        @routes.post("/hooks/session-start")
+        async def hook_session_start(req: web.Request) -> web.Response:
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+            cwd = payload.get("cwd", "")
+
+            session = self._session_mgr.get(session_key)
+            if not session:
+                session = await self._auto_bind_session(session_key, cwd)
+            if session:
+                session.touch()
+                session.tui_active = time.time()
+                session.cwd = cwd or session.cwd
+                self._session_mgr.set_mode(session_key, SessionMode.HOOK)
+                # Start JSONL file watcher (Channel 2)
+                if cwd:
+                    self._file_watcher.watch(session_key, cwd)
+                if self._slack and session.channel_id and session.session_id not in self._tui_sync_muted:
+                    await self._slack.post_text(
+                        session.channel_id,
+                        "▶️ _Session started_",
+                        session.thread_ts,
+                    )
+            return web.Response(text="ok")
+
+        @routes.post("/hooks/session-end")
+        async def hook_session_end(req: web.Request) -> web.Response:
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+
+            session = self._session_mgr.get(session_key)
+            if session:
+                session.touch()
+                session.tui_active = 0
+                self._file_watcher.unwatch(session_key)
+                if self._slack and session.channel_id and session.session_id not in self._tui_sync_muted:
+                    await self._slack.post_text(
+                        session.channel_id,
+                        "⏹️ _Session ended_",
+                        session.thread_ts,
+                    )
+                self._session_mgr.set_mode(session_key, SessionMode.IDLE)
+                self._progress.pop(session_key, None)
+            return web.Response(text="ok")
+
+        @routes.post("/hooks/notification")
+        async def hook_notification(req: web.Request) -> web.Response:
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+            notification_type = payload.get("notification_type", "")
+            message = payload.get("message", "")
+
+            session = self._session_mgr.get(session_key)
+            if not session:
+                return web.Response(text="ok")
+            session.touch()
+
+            # Skip permission_prompt — handled by PreToolUse
+            if notification_type == "permission_prompt":
+                return web.Response(text="ok")
+
+            if self._slack and session.channel_id and session.session_id not in self._tui_sync_muted:
+                if notification_type == "idle_prompt":
+                    await self._slack.post_text(
+                        session.channel_id,
+                        "⏸️ _Waiting for input..._",
+                        session.thread_ts,
+                    )
+                elif message:
+                    await self._slack.post_text(
+                        session.channel_id,
+                        f"🔔 {message[:_SLACK_MAX_TEXT]}",
+                        session.thread_ts,
+                    )
+            return web.Response(text="ok")
+
+        @routes.post("/hooks/subagent-stop")
+        async def hook_subagent_stop(req: web.Request) -> web.Response:
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+
+            session = self._session_mgr.get(session_key)
+            if session:
+                session.touch()
+                if self._slack and session.channel_id and session.session_id not in self._tui_sync_muted:
+                    await self._update_progress(session, "🤖 _Subagent completed_")
+            return web.Response(text="ok")
+
+        @routes.post("/hooks/pre-compact")
+        async def hook_pre_compact(req: web.Request) -> web.Response:
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+            compact_type = payload.get("compact_type", "auto")
+
+            session = self._session_mgr.get(session_key)
+            if session:
+                session.touch()
+                if self._slack and session.channel_id and session.session_id not in self._tui_sync_muted:
+                    await self._slack.post_text(
+                        session.channel_id,
+                        f"📦 _Compacting context ({compact_type})..._",
+                        session.thread_ts,
+                    )
             return web.Response(text="ok")
 
         app = web.Application()
@@ -909,6 +1063,7 @@ class Daemon:
     async def stop(self) -> None:
         if self._cleanup_task:
             self._cleanup_task.cancel()
+        self._file_watcher.stop()
         await self._pool.terminate_all()
         if self._socket_client:
             await self._socket_client.close()

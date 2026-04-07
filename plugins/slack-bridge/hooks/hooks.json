@@ -13,6 +13,30 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook PreToolUse",
+            "timeout": 310000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook PostToolUse",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -20,6 +44,73 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook Stop",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook SessionStart",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook SessionEnd",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook Notification",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook SubagentStop",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook PreCompact",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "matcher": "manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-hook PreCompact",
             "timeout": 10000
           }
         ]
