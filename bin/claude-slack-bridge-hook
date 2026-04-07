@@ -151,13 +151,10 @@ def main():
     endpoint = f"/hooks/{event_type}"
 
     if event_type == "pre-tool-use":
-        timeout = load_approval_timeout() + 10
-        result = post_to_daemon(endpoint, payload, port, timeout)
-        if result in ("approved", "error"):
-            sys.exit(0)
-        else:
-            sys.stderr.write("Tool rejected via Slack approval\n")
-            sys.exit(2)
+        # Fire-and-forget notification only — no blocking approval.
+        # TUI has its own approval UI; blocking here causes double-approval.
+        post_to_daemon(endpoint, payload, port, timeout=5)
+        sys.exit(0)
     else:
         post_to_daemon(endpoint, payload, port, timeout=5)
         sys.exit(0)

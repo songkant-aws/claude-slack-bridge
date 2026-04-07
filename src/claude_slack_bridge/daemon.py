@@ -811,7 +811,17 @@ class Daemon:
                         # Cannot reach Slack — fail open so TUI isn't blocked
                         return web.Response(text="approved")
 
-                # Post approval buttons to the Slack thread
+                # For TUI (HOOK mode): notification only, no blocking approval.
+                # TUI has its own approval UI; blocking here causes double-approval.
+                if session.mode == SessionMode.HOOK.value or session.tui_active:
+                    if session.session_id not in self._tui_sync_muted:
+                        blocks = build_tool_notification_blocks(tool_name, tool_input)
+                        await self._slack.post_blocks(
+                            session.channel_id, blocks, f"🔧 {tool_name}", session.thread_ts
+                        )
+                    return web.Response(text="approved")
+
+                # PROCESS mode: post approval buttons to the Slack thread
                 request_id = str(uuid.uuid4())
                 blocks = build_approval_blocks(
                     tool_name=tool_name,
