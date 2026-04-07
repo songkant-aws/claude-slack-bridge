@@ -18,7 +18,7 @@ def _build_hook_payload(event_type: str, stdin_json: dict) -> dict:
         "cwd": stdin_json.get("cwd", ""),
     }
 
-    if event_type in ("pre-tool-use", "post-tool-use"):
+    if event_type in ("pre-tool-use", "post-tool-use", "permission-request"):
         payload["tool_name"] = stdin_json.get("tool_name", "")
         payload["tool_input"] = stdin_json.get("tool_input", {})
         payload["tool_use_id"] = stdin_json.get("tool_use_id", "")

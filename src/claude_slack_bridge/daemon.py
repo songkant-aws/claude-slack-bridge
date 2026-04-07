@@ -994,6 +994,68 @@ class Daemon:
                     )
             return web.Response(text="ok")
 
+        @routes.post("/hooks/permission-request")
+        async def hook_permission_request(req: web.Request) -> web.Response:
+            """Handle PermissionRequest from TUI — block until Slack approval."""
+            payload = await req.json()
+            session_key = payload.get("session_key", "")
+            tool_name = payload.get("tool_name", "")
+            tool_input = payload.get("tool_input", {})
+            cwd = payload.get("cwd", "")
+
+            # Fast-path: YOLO mode
+            if self._yolo_mode:
+                return web.Response(text="approved")
+
+            session = self._session_mgr.get(session_key)
+
+            # Fast-path: trusted session
+            if session and session.session_id in self._trusted_sessions:
+                return web.Response(text="approved")
+
+            # Fast-path: safe tools
+            if tool_name in self._config.auto_approve_tools:
+                return web.Response(text="approved")
+
+            if not self._slack:
+                return web.Response(text="approved")
+
+            # Auto-bind if needed
+            if not session:
+                session = await self._auto_bind_session(session_key, cwd)
+                if not session:
+                    return web.Response(text="approved")
+
+            session.touch()
+            session.tui_active = time.time()
+
+            # Post approval buttons
+            request_id = str(uuid.uuid4())
+            blocks = build_approval_blocks(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                session_id=session.session_id,
+                session_name=session.session_name,
+                request_id=request_id,
+            )
+            await self._slack.post_blocks(
+                session.channel_id,
+                blocks,
+                f"🔐 Approve {tool_name}?",
+                session.thread_ts,
+            )
+
+            # Block until Slack button click or timeout
+            state = self._approval_mgr.create(request_id)
+            result = await state.wait(
+                timeout=self._config.approval_timeout_secs
+            )
+            self._approval_mgr.cleanup(request_id)
+
+            return web.Response(
+                text="approved" if result == "approved" else "rejected"
+            )
+
         app = web.Application()
         app.router.add_routes(routes)
         return app

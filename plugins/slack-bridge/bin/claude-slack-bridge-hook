@@ -56,7 +56,7 @@ def build_payload(event_type, stdin_json):
         "session_key": derive_session_key(stdin_json),
         "cwd": stdin_json.get("cwd", ""),
     }
-    if event_type in ("pre-tool-use", "post-tool-use"):
+    if event_type in ("pre-tool-use", "post-tool-use", "permission-request"):
         payload["tool_name"] = stdin_json.get("tool_name", "")
         payload["tool_input"] = stdin_json.get("tool_input", {})
         payload["tool_use_id"] = stdin_json.get("tool_use_id", "")
@@ -98,6 +98,7 @@ def post_to_daemon(endpoint, payload, port, timeout):
 EVENT_MAP = {
     "PreToolUse": "pre-tool-use",
     "PostToolUse": "post-tool-use",
+    "PermissionRequest": "permission-request",
     "UserPromptSubmit": "user-prompt",
     "Stop": "stop",
     "SessionStart": "session-start",
@@ -108,6 +109,7 @@ EVENT_MAP = {
     # Also accept already-mapped names
     "pre-tool-use": "pre-tool-use",
     "post-tool-use": "post-tool-use",
+    "permission-request": "permission-request",
     "user-prompt": "user-prompt",
     "stop": "stop",
     "session-start": "session-start",
@@ -146,6 +148,35 @@ def main():
         # TUI has its own approval UI; blocking here causes double-approval.
         post_to_daemon(endpoint, payload, port, timeout=5)
         sys.exit(0)
+    elif event_type == "permission-request":
+        # Block and wait for Slack approval, return decision to Claude Code.
+        # This replaces TUI's built-in approval prompt.
+        timeout = load_approval_timeout() + 10
+        result = post_to_daemon(endpoint, payload, port, timeout)
+        if result == "rejected":
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Denied via Slack",
+                    },
+                }
+            }
+            print(json.dumps(output))
+            sys.exit(0)
+        elif result == "approved":
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"},
+                }
+            }
+            print(json.dumps(output))
+            sys.exit(0)
+        else:
+            # Daemon unreachable or timeout — fall through to TUI prompt
+            sys.exit(0)
     else:
         post_to_daemon(endpoint, payload, port, timeout=5)
         sys.exit(0)

@@ -25,6 +25,18 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-slack-bridge-hook PermissionRequest",
+            "timeout": 310000
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "*",
