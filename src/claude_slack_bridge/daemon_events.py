@@ -214,6 +214,8 @@ class EventsMixin:
             sent = await send_message_to_session(cwd, text)
             if sent:
                 await self._slack.add_reaction(channel_id, event.get("ts", ""), "outbox_tray")
+                # Track forwarded text so UserPromptSubmit hook won't echo it back
+                self._forwarded_prompts.add(text.strip())
             else:
                 # No tmux pane found — fall back to --print
                 await self._resume_process(session, text)

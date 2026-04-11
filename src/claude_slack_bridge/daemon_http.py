@@ -244,10 +244,15 @@ def create_http_app(daemon) -> web.Application:
         # Sync TUI content to Slack (unless muted)
         if session.session_id not in daemon._tui_sync_muted:
             if hook_type == "user-prompt" and daemon._slack and session.channel_id:
-                blocks = build_user_prompt_blocks(payload.get("prompt", ""))
-                await daemon._slack.post_blocks(
-                    session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
-                )
+                prompt_text = payload.get("prompt", "")
+                # Skip if this prompt was forwarded from Slack → tmux (avoid echo)
+                if prompt_text.strip() in daemon._forwarded_prompts:
+                    daemon._forwarded_prompts.discard(prompt_text.strip())
+                else:
+                    blocks = build_user_prompt_blocks(prompt_text)
+                    await daemon._slack.post_blocks(
+                        session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
+                    )
             elif hook_type == "post-tool-use" and daemon._slack and session.channel_id:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})

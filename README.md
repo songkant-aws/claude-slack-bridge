@@ -47,20 +47,17 @@ cd /your/project && claude --resume <session-id>
 
 ### TUI-first: sync to Slack
 
-Working at your desk? Use TUI as usual. Whenever you want Slack as a mirror — run `/slack-bridge:sync-on`. From that point on, everything syncs.
+Working at your desk? Use TUI as usual. Whenever you want Slack as a mirror — run `/slack-bridge:sync-on`. From that point on, everything syncs bidirectionally.
 
 ```
 1. Start TUI:          claude
-2. Work as usual       (sync-on can happen anytime — now, later, whenever)
+2. Work as usual       (sync-on can happen anytime)
 3. /slack-bridge:sync-on → session binds to a Slack DM thread
 4. Leave for lunch     →  pull out your phone, reply in the Slack thread
-5. Claude responds     →  same session, same context, no interruption
-6. Back at desk        →  keep working in TUI (Slack chat becomes a
-                          side conversation), or quit + `claude --resume`
-                          to merge the full history back into TUI*
+5. Message goes to TUI →  tmux send-keys delivers it directly into your session
+6. Claude responds     →  response syncs back to Slack automatically
+7. Back at desk        →  keep working in TUI, full context preserved
 ```
-
-\* *TUI does not live-reload session history — a platform limitation. Without resume, the Slack portion lives as a parallel branch of the conversation.*
 
 ## How is this different?
 
@@ -101,7 +98,9 @@ Then in Claude Code TUI:
 3. Add **Bot Token Scopes**: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `im:history`, `im:read`, `reactions:write`
 4. **Event Subscriptions** → Subscribe to bot events: `app_mention`, `message.channels`, `message.im`
 5. **Interactivity** → Enable (for OPTIONS buttons)
-6. Install app to workspace, invite bot to channels
+6. **Assistant** → Enable `assistant_view` in app manifest with `assistant:write` scope
+7. **Event Subscriptions** → Also subscribe to: `assistant_thread_started`, `assistant_thread_context_changed`
+8. Install app to workspace, invite bot to channels
 
 </details>
 
@@ -141,14 +140,22 @@ cd claude-slack-bridge && python3 -m venv .venv && .venv/bin/pip install -e .
 | Reply in thread | Thread | Continue session |
 | `@bot resume <UUID>` | Channel | Bind TUI session to thread |
 | `resume <UUID>` | DM | Bind TUI session to thread |
+| `!stop` | Thread | Halt running session |
+| `yolo off` | Thread | Disable YOLO/Trust mode |
+| `sync off` / `sync on` | Thread | Mute/unmute TUI→Slack sync |
 
 ## Features
 
-- **Streaming responses** — live preview updates in Slack, final result overwrites progress
+- **Bidirectional sync** — Slack messages forward into TUI via tmux, TUI responses sync back to Slack
+- **Streaming responses** — live preview with cursor, final result overwrites progress
+- **Phase-aware reactions** — emoji changes with processing stage (thinking → coding → browsing → done)
+- **Thread status** — "is thinking...", "is using Bash" shown in Slack thread header
+- **Timing footer** — "Finished in 2m 15s" posted after each response
+- **!stop command** — type `!stop` in thread to halt a running session
 - **OPTIONS buttons** — Claude can suggest choices as clickable Slack buttons
-- **Markdown → mrkdwn** — proper formatting conversion, long messages auto-split
-- **Dual-mode architecture** — Slack drives Claude via `--print` subprocess (PROCESS mode), or hooks sync TUI to Slack (HOOK mode)
-- **Session persistence** — sessions survive TUI restarts, resume from either side
+- **Markdown → mrkdwn** — tables, mermaid diagrams, code blocks properly converted
+- **Dual-mode architecture** — Slack drives Claude via `--print` (PROCESS), or hooks sync TUI to Slack (HOOK)
+- **Session persistence** — sessions survive restarts, resume from either side
 
 ## Config
 

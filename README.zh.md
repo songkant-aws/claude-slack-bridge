@@ -51,16 +51,13 @@ cd /your/project && claude --resume <session-id>
 
 ```
 1. 启动 TUI：          claude
-2. 正常工作            （sync-on 随时都可以做，不急）
+2. 正常工作            （sync-on 随时都可以做）
 3. /slack-bridge:sync-on → 会话绑定到 Slack DM 线程
 4. 去吃午饭            →  掏出手机，在 Slack 线程里继续对话
-5. Claude 回复          →  同一个会话，同一个上下文，无缝衔接
-6. 回到工位            →  直接继续在 TUI 工作（Slack 对话变成
-                          分支对话），或 quit + `claude --resume`
-                          把完整历史合并回 TUI*
+5. 消息直达 TUI        →  通过 tmux send-keys 直接注入你的会话
+6. Claude 回复          →  自动同步回 Slack
+7. 回到工位            →  继续在 TUI 工作，完整上下文保留
 ```
-
-\* *TUI 不支持运行时刷新会话历史（平台限制）。不 resume 的话，Slack 部分的对话会作为并行分支存在。*
 
 ## 与其他方案的区别
 
@@ -101,7 +98,9 @@ claude plugins install slack-bridge@qianheng-plugins
 3. 添加 **Bot Token Scopes**：`app_mentions:read`、`channels:history`、`channels:read`、`chat:write`、`im:history`、`im:read`、`reactions:write`
 4. **Event Subscriptions** → 订阅 bot 事件：`app_mention`、`message.channels`、`message.im`
 5. **Interactivity** → 启用（用于选项按钮）
-6. 安装应用到工作区，邀请 bot 进入频道
+6. **Assistant** → 在 app manifest 中启用 `assistant_view`，添加 `assistant:write` scope
+7. **Event Subscriptions** → 额外订阅：`assistant_thread_started`、`assistant_thread_context_changed`
+8. 安装应用到工作区，邀请 bot 进入频道
 
 </details>
 
@@ -141,14 +140,22 @@ cd claude-slack-bridge && python3 -m venv .venv && .venv/bin/pip install -e .
 | 线程回复 | 线程 | 继续会话 |
 | `@bot resume <UUID>` | 频道 | 绑定 TUI 会话到线程 |
 | `resume <UUID>` | 私信 | 绑定 TUI 会话到线程 |
+| `!stop` | 线程 | 终止运行中的会话 |
+| `yolo off` | 线程 | 关闭 YOLO/Trust 模式 |
+| `sync off` / `sync on` | 线程 | 静音/恢复 TUI→Slack 同步 |
 
 ## 功能特性
 
-- **流式响应** —— Slack 中实时预览更新，最终结果覆盖进度消息
+- **双向同步** —— Slack 消息通过 tmux 转发到 TUI，TUI 响应自动同步回 Slack
+- **流式响应** —— 实时预览带光标，最终结果覆盖进度消息
+- **阶段感知 Reactions** —— emoji 随处理阶段变化（思考 → 编码 → 浏览 → 完成）
+- **线程状态** —— Slack 线程头显示 "is thinking..."、"is using Bash"
+- **计时 Footer** —— 每次响应后显示 "Finished in 2m 15s"
+- **!stop 命令** —— 在线程中输入 `!stop` 终止运行中的会话
 - **选项按钮** —— Claude 可以将选项渲染为 Slack 可点击按钮
-- **Markdown → mrkdwn** —— 正确的格式转换，长消息自动分割
-- **双模架构** —— Slack 通过 `--print` 子进程驱动 Claude（PROCESS 模式），或 hooks 将 TUI 同步到 Slack（HOOK 模式）
-- **会话持久化** —— 会话在 TUI 重启后保留，任一端可恢复
+- **Markdown → mrkdwn** —— 表格、Mermaid 图、代码块正确转换
+- **双模架构** —— Slack 通过 `--print` 驱动 Claude（PROCESS），或 hooks 将 TUI 同步到 Slack（HOOK）
+- **会话持久化** —— 会话在重启后保留，任一端可恢复
 
 ## 配置
 
