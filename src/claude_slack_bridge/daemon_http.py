@@ -247,22 +247,11 @@ def create_http_app(daemon) -> web.Application:
 
         # Sync TUI content to Slack (unless muted)
         if session.session_id not in daemon._tui_sync_muted:
-            if hook_type == "user-prompt" and daemon._slack and session.channel_id:
-                prompt_text = payload.get("prompt", "")
-                # Skip Slack→tmux echo
-                if prompt_text.strip() in daemon._forwarded_prompts:
-                    daemon._forwarded_prompts.discard(prompt_text.strip())
-                # Skip system messages (task-notification, system-reminder, etc.)
-                elif prompt_text.strip().startswith("<") and any(
-                    tag in prompt_text[:100]
-                    for tag in ("task-notification", "system-reminder", "local-command")
-                ):
-                    pass
-                else:
-                    blocks = build_user_prompt_blocks(prompt_text)
-                    await daemon._slack.post_blocks(
-                        session.channel_id, blocks, "User prompt (TUI)", session.thread_ts
-                    )
+            if hook_type == "user-prompt":
+                # Don't echo user prompts to Slack — user either typed it
+                # in Slack (would be echo) or in TUI (they know what they typed).
+                # Only tool activity and Claude responses are worth syncing.
+                pass
             elif hook_type == "post-tool-use" and daemon._slack and session.channel_id:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})
