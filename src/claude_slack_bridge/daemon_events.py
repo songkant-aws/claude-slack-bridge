@@ -216,6 +216,8 @@ class EventsMixin:
                 await self._slack.add_reaction(channel_id, event.get("ts", ""), "outbox_tray")
                 self._forwarded_prompts.add(text.strip())
             else:
+                # TUI gone — fall back to --print, revert origin
+                session.origin = "slack"
                 await self._resume_process(session, text)
         else:
             # Slack-originated session: always use --print
