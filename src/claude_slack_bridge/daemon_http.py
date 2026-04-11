@@ -61,6 +61,32 @@ def _read_last_turn_from_jsonl(conv_parser, session_id: str, cwd: str) -> str:
         return ""
 
 
+def _read_recent_assistant_text(conv_parser, session_id: str, cwd: str) -> str:
+    """Read the most recent assistant text from JSONL that hasn't been shown yet.
+
+    Called on PostToolUse to surface intermediate reasoning text in real-time.
+    Returns the last assistant text block before the most recent tool_use.
+    """
+    if not cwd:
+        return ""
+    try:
+        conv_parser.parse_incremental(session_id, cwd)
+        all_msgs = conv_parser.get_all_messages(session_id)
+        if not all_msgs:
+            return ""
+
+        # Walk backwards: find the last assistant text before the last tool_use
+        for i in range(len(all_msgs) - 1, -1, -1):
+            msg = all_msgs[i]
+            if msg.role == "assistant" and msg.text:
+                return msg.text
+            if msg.role == "user":
+                break  # Don't go past the current turn
+        return ""
+    except Exception:
+        return ""
+
+
 def create_http_app(daemon) -> web.Application:
     """Build an aiohttp Application with all daemon HTTP routes.
 
@@ -331,17 +357,31 @@ def create_http_app(daemon) -> web.Application:
                     except Exception:
                         logger.debug("Failed to update approval message", exc_info=True)
 
-                # Compact one-liner progress update
-                if tool_name == "Bash":
-                    detail = tool_input.get("command", "")[:80]
+                # Read JSONL for any intermediate assistant text before this tool
+                cwd = payload.get("cwd", "") or session.cwd
+                if cwd:
+                    recent_text = _read_recent_assistant_text(
+                        daemon._conv_parser, session.session_id, cwd
+                    )
+                    if recent_text:
+                        await daemon._update_progress(
+                            session, "_" + recent_text[:200] + "_"
+                        )
+
+                # Tool/Skill status — different emoji for skills
+                is_skill = tool_name == "Skill"
+                if is_skill:
+                    skill_name = tool_input.get("skill", tool_name)
+                    line = "\U0001f3af `" + skill_name + "`"
+                elif tool_name == "Bash":
+                    line = "\U0001fac6 `Bash` " + tool_input.get("command", "")[:80]
                 elif tool_name in ("Read", "Write", "Edit", "Glob", "Grep"):
-                    detail = tool_input.get("file_path", tool_input.get("pattern", ""))[:80]
+                    line = "\U0001fac6 `" + tool_name + "` " + tool_input.get("file_path", tool_input.get("pattern", ""))[:80]
+                elif tool_name == "Agent":
+                    line = "\U0001f916 `Agent` " + tool_input.get("description", tool_input.get("prompt", ""))[:60]
                 else:
-                    detail = tool_name
-                await daemon._update_progress(
-                    session, f"\U0001fac6 `{tool_name}` {detail}",
-                    replace=True,
-                )
+                    line = "\U0001fac6 `" + tool_name + "`"
+                await daemon._update_progress(session, line, replace=True)
             elif hook_type == "stop" and daemon._slack and session.channel_id:
                 # Clear thread status (stop glowing)
                 await daemon._slack.set_thread_status(
