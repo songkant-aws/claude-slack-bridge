@@ -237,6 +237,10 @@ def create_http_app(daemon) -> web.Application:
         # Promote IDLE → HOOK when TUI hooks start arriving
         if session.mode == SessionMode.IDLE.value:
             daemon._session_mgr.set_mode(session.session_id, SessionMode.HOOK)
+        # Promote origin to "tui" when TUI hooks arrive (e.g., user resumed
+        # a Slack-originated session in TUI via `claude --resume`)
+        if session.origin != "tui":
+            session.origin = "tui"
 
         # JSONL watcher disabled — hooks (PostToolUse, Stop) now provide
         # all needed information; the watcher caused duplicate messages.
