@@ -224,10 +224,14 @@ class EventsMixin:
             cwd = session.cwd or self._config.work_dir
             sent = await send_message_to_session(cwd, text)
             if sent:
-                await self._slack.add_reaction(channel_id, event.get("ts", ""), "outbox_tray")
                 self._forwarded_prompts.add(text.strip())
             else:
-                # TUI gone — fall back to --print, revert origin
+                # TUI gone — notify user and fall back to --print
+                await self._slack.post_text(
+                    channel_id,
+                    "_TUI not available, starting Claude process..._",
+                    thread_ts,
+                )
                 session.origin = "slack"
                 await self._resume_process(session, text)
         else:

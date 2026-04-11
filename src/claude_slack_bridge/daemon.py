@@ -79,9 +79,16 @@ class Daemon(StreamMixin, EventsMixin):
                 for session in self._session_mgr.list_active():
                     age = now - session.last_active
                     if session.mode == SessionMode.IDLE.value and age > archive_timeout:
+                        # Clean up orphaned reaction controllers
+                        rc = self._reaction_controllers.pop(session.session_id, None)
+                        if rc:
+                            asyncio.ensure_future(rc.finalize())
                         self._session_mgr.archive(session.session_id)
                         logger.info("Archived stale idle session %s", session.session_id)
                     elif session.mode == SessionMode.PROCESS.value and age > process_timeout:
+                        rc = self._reaction_controllers.pop(session.session_id, None)
+                        if rc:
+                            asyncio.ensure_future(rc.finalize(error=True))
                         await self._pool.terminate(session.session_id)
                         self._session_mgr.set_mode(session.session_id, SessionMode.IDLE)
                         logger.info("Terminated idle process session %s (no activity for %ds)", session.session_id, int(age))

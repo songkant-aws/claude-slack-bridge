@@ -47,7 +47,7 @@ class StreamMixin:
         now = time.time()
         if sid not in self._progress:
             msg_ts = await self._slack.post_text(
-                session.channel_id, "\U0001f914 _thinking..._\n" + line, session.thread_ts
+                session.channel_id, line + _CURSOR, session.thread_ts
             )
             self._progress[sid] = {"msg_ts": msg_ts, "last_update": now, "lines": [line]}
         else:
@@ -56,10 +56,9 @@ class StreamMixin:
                 state["lines"][-1] = line
             else:
                 state["lines"].append(line)
-            # Keep last 3 lines: intermediate text + current tool status
             display = state["lines"][-3:]
             if now - state["last_update"] >= _EDIT_INTERVAL:
-                text = "\u231b " + "\n".join(display) + _CURSOR
+                text = "\n".join(display) + _CURSOR
                 try:
                     await self._slack.web.chat_update(
                         channel=session.channel_id, ts=state["msg_ts"], text=text[:_SLACK_MAX_TEXT]
@@ -152,7 +151,7 @@ class StreamMixin:
 
         for msg in messages:
             if msg.role == "assistant" and msg.text:
-                await self._update_progress(session, "\U0001f4ac " + msg.text[:200])
+                await self._update_progress(session, "_" + msg.text[:200] + "_")
             elif msg.role == "tool_use":
                 detail = ""
                 if msg.tool_name == "Bash":
@@ -161,7 +160,7 @@ class StreamMixin:
                     detail = msg.tool_input.get("file_path", "")[:60]
                 else:
                     detail = msg.tool_name
-                await self._update_progress(session, "\U0001f527 " + msg.tool_name + ": " + detail, replace=True)
+                await self._update_progress(session, "\U0001fac6 `" + msg.tool_name + "` " + detail, replace=True)
 
     # ── Stream event handler (PROCESS mode) ──
 
