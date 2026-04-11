@@ -252,6 +252,10 @@ def create_http_app(daemon) -> web.Application:
                 # New turn starting — clear stale state from previous turn
                 daemon._finalized_sessions.discard(session.session_id)
                 daemon._progress.pop(session.session_id, None)
+                # Finalize any leftover reaction from previous turn
+                old_rc = daemon._reaction_controllers.pop(session.session_id, None)
+                if old_rc:
+                    asyncio.ensure_future(old_rc.finalize())
                 prompt_text = payload.get("prompt", "")
                 stripped = prompt_text.strip()
                 # Skip Slack→tmux echo (forwarded from Slack, would be duplicate)
@@ -274,6 +278,14 @@ def create_http_app(daemon) -> web.Application:
             elif hook_type == "post-tool-use" and daemon._slack and session.channel_id:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})
+
+                # Update phase-aware reaction
+                rc = daemon._reaction_controllers.get(session.session_id)
+                if rc:
+                    from claude_slack_bridge.reactions import tool_to_phase
+                    phase = tool_to_phase(tool_name)
+                    asyncio.ensure_future(rc.set_phase(phase))
+                    rc.on_progress()
 
                 # If there's a pending approval message, replace it with result
                 pending_ts = daemon._pending_approval_msgs.pop(session.session_id, None)
@@ -298,14 +310,15 @@ def create_http_app(daemon) -> web.Application:
                     session, f"\U0001fac6 `{tool_name}` {detail}"
                 )
             elif hook_type == "stop" and daemon._slack and session.channel_id:
+                # Finalize reaction controller (eyes → lobster/error)
+                rc = daemon._reaction_controllers.pop(session.session_id, None)
+                if rc:
+                    asyncio.ensure_future(rc.finalize(error=False))
+
                 # PROCESS mode already finalizes via _on_stream_event result.
                 # HOOK/IDLE modes are TUI sessions — finalize from hook.
                 if session.mode != SessionMode.PROCESS.value:
                     response_text = payload.get("response", "")
-                    logger.info(
-                        "Stop hook: session=%s mode=%s response_len=%d",
-                        session.session_id[:12], session.mode, len(response_text),
-                    )
                     if response_text:
                         await daemon._finalize_progress(session, response_text)
 

@@ -58,6 +58,8 @@ class Daemon(StreamMixin, EventsMixin):
         self._pending_approval_msgs: dict[str, str] = {}
         # Sessions that have been finalized this turn — JSONL watcher skips these
         self._finalized_sessions: set[str] = set()
+        # Active reaction controllers per session (for TUI hook updates)
+        self._reaction_controllers: dict[str, StatusReactionController] = {}
         # Conversation parser (Channel 2: JSONL file monitoring)
         self._conv_parser = ConversationParser()
         self._file_watcher = SessionFileWatcher(

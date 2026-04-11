@@ -174,6 +174,8 @@ class EventsMixin:
 
         rc = StatusReactionController(self._slack, channel_id, msg_ts, asyncio.get_event_loop())
         await rc.set_phase("queued")
+        # Store so hooks (PostToolUse, Stop) can update phase
+        self._reaction_controllers[session.session_id] = rc
         session.touch()
 
         lower = text.strip().lower()
