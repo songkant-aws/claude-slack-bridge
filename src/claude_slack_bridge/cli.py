@@ -69,7 +69,17 @@ def init() -> None:
 
 
 def _register_hooks(config_dir: Path) -> None:
-    """Register hooks in ~/.claude/settings.json."""
+    """Register hooks in ~/.claude/settings.json.
+
+    Skips registration if the slack-bridge plugin is installed (its
+    hooks.json already provides all necessary hooks).
+    """
+    # Check if plugin hooks already handle this
+    plugin_hooks = config_dir.parent / "plugins" / "cache" / "slack-bridge"
+    if plugin_hooks.exists():
+        click.echo("Hooks already provided by slack-bridge plugin — skipping settings.json registration.")
+        return
+
     settings_path = Path.home() / ".claude" / "settings.json"
     settings: dict = {}
     if settings_path.is_file():

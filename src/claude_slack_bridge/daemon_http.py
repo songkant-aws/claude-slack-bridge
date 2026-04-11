@@ -7,10 +7,13 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 
 from aiohttp import web
+
+logger = logging.getLogger("claude_slack_bridge")
 
 from claude_slack_bridge.session_manager import SessionMode
 from claude_slack_bridge.slack_formatter import (
@@ -142,6 +145,7 @@ def create_http_app(daemon) -> web.Application:
         hook_type = req.match_info["hook_type"]
         payload = await req.json()
         session_key = payload.get("session_key", "")
+        logger.info("Hook received: %s session=%s", hook_type, session_key[:12] if session_key else "?")
 
         session = daemon._session_mgr.get(session_key)
 
@@ -256,6 +260,10 @@ def create_http_app(daemon) -> web.Application:
                 if session.mode != SessionMode.PROCESS.value:
                     response_text = payload.get("response", "")
                     if response_text:
+                        logger.info(
+                            "Stop hook → _finalize_progress for %s (mode=%s, len=%d)",
+                            session.session_id[:12], session.mode, len(response_text),
+                        )
                         await daemon._finalize_progress(session, response_text)
 
         if hook_type == "stop":
