@@ -61,7 +61,7 @@ class StreamMixin:
                     logger.debug("Failed to update progress message", exc_info=True)
 
     async def _finalize_progress(self, session: Session, final_text: str) -> None:
-        """Replace progress message with final result using plain text (no 'See more')."""
+        """Post final result. Keeps progress message as context if it has content."""
         sid = session.session_id
 
         cleaned, _thinking = strip_thinking_tags(final_text)
@@ -70,8 +70,28 @@ class StreamMixin:
 
         if sid in self._progress:
             state = self._progress.pop(sid)
+            lines = state.get("lines", [])
             msg_ts = state.get("msg_ts")
-            if msg_ts:
+
+            if lines and msg_ts:
+                # Progress has content (tool calls, intermediate text) — keep it
+                # as context, post final response as new message
+                try:
+                    summary = "\n".join(lines[-8:])
+                    await self._slack.web.chat_update(
+                        channel=session.channel_id, ts=msg_ts,
+                        text=summary[:_SLACK_MAX_TEXT],
+                    )
+                except Exception:
+                    pass
+                # Post final response as new message
+                chunks = split_message(display)
+                for chunk in chunks:
+                    await self._slack.post_text(
+                        session.channel_id, chunk, session.thread_ts
+                    )
+            elif msg_ts:
+                # Progress is empty placeholder — overwrite with response
                 try:
                     chunks = split_message(display)
                     await self._slack.web.chat_update(
@@ -90,8 +110,7 @@ class StreamMixin:
                     session.channel_id, display[:_SLACK_MAX_TEXT], session.thread_ts
                 )
         else:
-            titled = "*Claude Response*\n\n" + display
-            chunks = split_message(titled)
+            chunks = split_message(display)
             for chunk in chunks:
                 await self._slack.post_text(
                     session.channel_id, chunk, session.thread_ts
