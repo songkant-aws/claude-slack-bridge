@@ -208,6 +208,15 @@ class EventsMixin:
             await self._slack.post_text(channel_id, "\U0001f50a TUI sync resumed for this session", thread_ts)
             return
 
+        # Check for pending approval — remind user instead of forwarding
+        if session.session_id in self._pending_approval_msgs:
+            await self._slack.post_text(
+                channel_id,
+                "\u26a0\ufe0f _Waiting for tool approval above. Please Approve or Reject before continuing._",
+                thread_ts,
+            )
+            return
+
         if session.mode == SessionMode.PROCESS.value:
             await self._resume_process(session, text)
         elif session.origin == "tui":
