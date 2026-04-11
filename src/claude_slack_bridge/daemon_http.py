@@ -320,11 +320,6 @@ def create_http_app(daemon) -> web.Application:
                 )
                 # Finalize reaction controller (eyes → lobster/error)
                 rc = daemon._reaction_controllers.pop(session.session_id, None)
-                logger.info(
-                    "Stop: rc=%s sid=%s keys=%s",
-                    rc is not None, session.session_id[:12],
-                    list(daemon._reaction_controllers.keys())[:3],
-                )
                 if rc:
                     asyncio.ensure_future(rc.finalize(error=False))
 

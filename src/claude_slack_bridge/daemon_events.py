@@ -176,7 +176,6 @@ class EventsMixin:
         await rc.set_phase("queued")
         # Store so hooks (PostToolUse, Stop) can update phase
         self._reaction_controllers[session.session_id] = rc
-        logger.info("RC created for %s, stored key=%s", msg_ts, session.session_id[:12])
         session.touch()
 
         lower = text.strip().lower()
