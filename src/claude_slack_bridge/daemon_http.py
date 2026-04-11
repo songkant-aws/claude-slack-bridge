@@ -256,6 +256,10 @@ def create_http_app(daemon) -> web.Application:
                 old_rc = daemon._reaction_controllers.pop(session.session_id, None)
                 if old_rc:
                     asyncio.ensure_future(old_rc.finalize())
+                # Set thread status — activates glowing name
+                await daemon._slack.set_thread_status(
+                    session.channel_id, session.thread_ts, "is working on your request"
+                )
                 prompt_text = payload.get("prompt", "")
                 stripped = prompt_text.strip()
                 # Skip Slack→tmux echo (forwarded from Slack, would be duplicate)
@@ -279,13 +283,16 @@ def create_http_app(daemon) -> web.Application:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})
 
-                # Update phase-aware reaction
+                # Update phase-aware reaction + thread status
                 rc = daemon._reaction_controllers.get(session.session_id)
                 if rc:
                     from claude_slack_bridge.reactions import tool_to_phase
                     phase = tool_to_phase(tool_name)
                     asyncio.ensure_future(rc.set_phase(phase))
                     rc.on_progress()
+                await daemon._slack.set_thread_status(
+                    session.channel_id, session.thread_ts, f"is using {tool_name}"
+                )
 
                 # If there's a pending approval message, replace it with result
                 pending_ts = daemon._pending_approval_msgs.pop(session.session_id, None)
@@ -310,6 +317,10 @@ def create_http_app(daemon) -> web.Application:
                     session, f"\U0001fac6 `{tool_name}` {detail}"
                 )
             elif hook_type == "stop" and daemon._slack and session.channel_id:
+                # Clear thread status (stop glowing)
+                await daemon._slack.set_thread_status(
+                    session.channel_id, session.thread_ts, ""
+                )
                 # Finalize reaction controller (eyes → lobster/error)
                 rc = daemon._reaction_controllers.pop(session.session_id, None)
                 if rc:
