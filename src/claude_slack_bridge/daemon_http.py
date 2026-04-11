@@ -245,16 +245,8 @@ def create_http_app(daemon) -> web.Application:
             # All other modes (HOOK, IDLE) are TUI sessions — TUI has its
             # own approval UI; blocking here causes double-approval.
             if session.mode != SessionMode.PROCESS.value:
-                # Read JSONL for intermediate assistant text BEFORE this tool
-                cwd = payload.get("cwd", "") or session.cwd
-                if cwd and session.session_id not in daemon._tui_sync_muted:
-                    recent_text = _read_recent_assistant_text(
-                        daemon._conv_parser, session.session_id, cwd
-                    )
-                    if recent_text:
-                        await daemon._update_progress(
-                            session, "_" + recent_text[:300] + "_"
-                        )
+                # Auto-approve for TUI sessions. JSONL watcher (started on
+                # UserPromptSubmit) handles intermediate text display.
                 return web.Response(text="approved")
 
             # PROCESS mode: post approval buttons to the Slack thread
@@ -306,15 +298,17 @@ def create_http_app(daemon) -> web.Application:
         if session.origin != "tui":
             session.origin = "tui"
 
-        # JSONL watcher disabled — caused persistent duplicate messages
-        # due to race conditions with Stop hook. Hooks cover all sync needs.
-
         # Sync TUI content to Slack (unless muted)
         if session.session_id not in daemon._tui_sync_muted:
             if hook_type == "user-prompt" and daemon._slack and session.channel_id:
-                # New turn starting — clear stale state from previous turn
+                # New turn starting — clear stale state, start JSONL watcher
                 daemon._finalized_sessions.discard(session.session_id)
                 daemon._progress.pop(session.session_id, None)
+                # Start JSONL watcher (Claude Island pattern: hooks are lifecycle
+                # signals, watcher is the content source)
+                cwd = payload.get("cwd", "") or session.cwd
+                if cwd:
+                    daemon._file_watcher.watch(session.session_id, cwd)
                 # Set thread status — activates glowing name
                 await daemon._slack.set_thread_status(
                     session.channel_id, session.thread_ts, "is working on your request"
@@ -380,6 +374,9 @@ def create_http_app(daemon) -> web.Application:
                     line = "\U0001fac6 `" + tool_name + "`"
                 await daemon._update_progress(session, line, replace=True)
             elif hook_type == "stop" and daemon._slack and session.channel_id:
+                # Stop JSONL watcher FIRST — prevents race with finalize
+                daemon._file_watcher.unwatch(session.session_id)
+
                 # Clear thread status (stop glowing)
                 await daemon._slack.set_thread_status(
                     session.channel_id, session.thread_ts, ""
@@ -390,10 +387,8 @@ def create_http_app(daemon) -> web.Application:
                     asyncio.ensure_future(rc.finalize(error=False))
 
                 # PROCESS mode already finalizes via _on_stream_event result.
-                # HOOK/IDLE modes are TUI sessions — read JSONL for full turn.
+                # HOOK/IDLE modes: read JSONL for full turn, overwrite progress.
                 if session.mode != SessionMode.PROCESS.value:
-                    # Read JSONL file for complete turn content (Claude Island pattern)
-                    # This is the single source of truth — no race with watcher.
                     cwd = payload.get("cwd", "") or session.cwd
                     full_text = _read_last_turn_from_jsonl(
                         daemon._conv_parser, session.session_id, cwd

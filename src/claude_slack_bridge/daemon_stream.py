@@ -123,9 +123,9 @@ class StreamMixin:
             return
         if session.session_id in self._tui_sync_muted:
             return
-        if session.mode != SessionMode.HOOK.value:
+        # Skip PROCESS mode (stream events handle it) and finalized turns
+        if session.mode == SessionMode.PROCESS.value:
             return
-        # Skip if this turn was already finalized by Stop hook
         if session.session_id in self._finalized_sessions:
             return
 
