@@ -245,8 +245,16 @@ def create_http_app(daemon) -> web.Application:
             # All other modes (HOOK, IDLE) are TUI sessions — TUI has its
             # own approval UI; blocking here causes double-approval.
             if session.mode != SessionMode.PROCESS.value:
-                # Auto-approve silently — PostToolUse will show compact
-                # one-liner in the single progress message (no flood).
+                # Read JSONL for intermediate assistant text BEFORE this tool
+                cwd = payload.get("cwd", "") or session.cwd
+                if cwd and session.session_id not in daemon._tui_sync_muted:
+                    recent_text = _read_recent_assistant_text(
+                        daemon._conv_parser, session.session_id, cwd
+                    )
+                    if recent_text:
+                        await daemon._update_progress(
+                            session, "_" + recent_text[:300] + "_"
+                        )
                 return web.Response(text="approved")
 
             # PROCESS mode: post approval buttons to the Slack thread
@@ -356,17 +364,6 @@ def create_http_app(daemon) -> web.Application:
                         )
                     except Exception:
                         logger.debug("Failed to update approval message", exc_info=True)
-
-                # Read JSONL for any intermediate assistant text before this tool
-                cwd = payload.get("cwd", "") or session.cwd
-                if cwd:
-                    recent_text = _read_recent_assistant_text(
-                        daemon._conv_parser, session.session_id, cwd
-                    )
-                    if recent_text:
-                        await daemon._update_progress(
-                            session, "_" + recent_text[:200] + "_"
-                        )
 
                 # Tool/Skill status — different emoji for skills
                 is_skill = tool_name == "Skill"
