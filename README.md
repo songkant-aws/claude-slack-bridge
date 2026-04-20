@@ -69,6 +69,10 @@ Working at your desk? Use TUI as usual. Whenever you want Slack as a mirror — 
 | **Integration** | Standalone UI | Multi-channel gateway | **Native Slack (threads, @mentions, notifications)** |
 | **Session handoff** | Web ↔ TUI | N/A | **Slack ↔ TUI via `claude --resume`** |
 
+## Requirements
+
+- **tmux** — TUI mode requires tmux. Slack→TUI message forwarding targets the Claude pane via `tmux send-keys -t $TMUX_PANE`. If Claude Code runs outside tmux, incoming Slack messages can't reach the TUI.
+
 ## Quick Start
 
 ```bash

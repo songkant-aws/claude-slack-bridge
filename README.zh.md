@@ -69,6 +69,10 @@ cd /your/project && claude --resume <session-id>
 | **集成** | 独立 UI | 多渠道网关 | **原生 Slack（线程、@提及、通知）** |
 | **会话交接** | Web ↔ TUI | N/A | **Slack ↔ TUI（`claude --resume`）** |
 
+## 环境要求
+
+- **tmux** —— TUI 模式依赖 tmux。Slack→TUI 消息转发通过 `tmux send-keys -t $TMUX_PANE` 注入到 Claude pane。如果 Claude Code 在 tmux 之外运行，Slack 发来的消息无法送达 TUI。
+
 ## 快速开始
 
 ```bash
