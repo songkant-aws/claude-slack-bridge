@@ -46,3 +46,35 @@ def format_rule(tool_name: str, rule_content: str | None) -> str:
     if rule_content:
         return f"{tool_name}({rule_content})"
     return tool_name
+
+
+_MAX_DETAIL = 80
+
+
+def format_invocation(tool_name: str, tool_input: dict | None) -> str:
+    """Compact one-shot summary of a tool call, e.g. for an Approve label.
+
+    Shows the actual command/path/pattern, unlike `format_rule` which
+    widens to a pattern.
+    """
+    tool_input = tool_input or {}
+    if tool_name == "Bash":
+        cmd = str(tool_input.get("command", "")).strip()
+        if cmd:
+            return f"Bash({_truncate(cmd)})"
+        return "Bash"
+    if tool_name in ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+        path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "").strip()
+        if path:
+            return f"{tool_name}({_truncate(path)})"
+        return tool_name
+    if tool_name in ("Glob", "Grep"):
+        pattern = str(tool_input.get("pattern", "")).strip()
+        if pattern:
+            return f"{tool_name}({_truncate(pattern)})"
+        return tool_name
+    return tool_name
+
+
+def _truncate(s: str) -> str:
+    return s if len(s) <= _MAX_DETAIL else s[: _MAX_DETAIL - 1] + "\u2026"

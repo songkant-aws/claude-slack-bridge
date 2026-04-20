@@ -252,7 +252,10 @@ class EventsMixin:
         if action_id == "approve_tool":
             state = self._approval_mgr.get(value)
             self._approval_mgr.resolve(value, "approved")
-            detail = state.tool_name if state else ""
+            detail = ""
+            if state:
+                from claude_slack_bridge.permissions import format_invocation
+                detail = format_invocation(state.tool_name, state.tool_input)
             if self._slack and channel_id and msg_ts:
                 blocks = build_approval_resolved_blocks("Tool", "approved", detail)
                 try:
@@ -262,7 +265,10 @@ class EventsMixin:
         elif action_id == "reject_tool":
             state = self._approval_mgr.get(value)
             self._approval_mgr.resolve(value, "rejected")
-            detail = state.tool_name if state else ""
+            detail = ""
+            if state:
+                from claude_slack_bridge.permissions import format_invocation
+                detail = format_invocation(state.tool_name, state.tool_input)
             if self._slack and channel_id and msg_ts:
                 blocks = build_approval_resolved_blocks("Tool", "rejected", detail)
                 try:
