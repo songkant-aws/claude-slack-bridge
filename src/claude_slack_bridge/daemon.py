@@ -59,6 +59,8 @@ class Daemon(StreamMixin, EventsMixin):
         self._forwarded_prompts: set[str] = set()
         # Pending approval messages: session_id -> msg_ts (for cleanup on TUI approval)
         self._pending_approval_msgs: dict[str, str] = {}
+        # Live TodoWrite messages: session_id -> msg_ts (updated in place)
+        self._todo_msgs: dict[str, str] = {}
         # Sessions that have been finalized this turn — JSONL watcher skips these
         self._finalized_sessions: set[str] = set()
         # Active reaction controllers per session (for TUI hook updates)

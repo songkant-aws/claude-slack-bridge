@@ -29,6 +29,41 @@ from claude_slack_bridge.slack_formatter import (
 _SLACK_MAX_TEXT = SLACK_MSG_LIMIT
 
 
+def _format_todos(todos: list[dict]) -> str:
+    """Render a TodoWrite todo list into a Slack-friendly checklist."""
+    if not todos:
+        return "📋 _(empty todo list)_"
+    icons = {"completed": "✅", "in_progress": "🔄", "pending": "⏳"}
+    lines = ["📋 *Progress*"]
+    for t in todos:
+        status = t.get("status", "pending")
+        icon = icons.get(status, "•")
+        # activeForm for in_progress (e.g. "Running tests"), plain content otherwise
+        text = t.get("activeForm") if status == "in_progress" else t.get("content", "")
+        if not text:
+            text = t.get("content", "")
+        lines.append(f"{icon} {text}")
+    return "\n".join(lines)[:_SLACK_MAX_TEXT]
+
+
+async def _post_or_update_todos(daemon, session, todos: list[dict]) -> None:
+    """Post a new todo message or update the existing one in place."""
+    text = _format_todos(todos)
+    existing_ts = daemon._todo_msgs.get(session.session_id)
+    if existing_ts:
+        try:
+            await daemon._slack.update_text(session.channel_id, existing_ts, text)
+            return
+        except Exception:
+            logger.debug("Todo update failed, posting new message", exc_info=True)
+            daemon._todo_msgs.pop(session.session_id, None)
+    try:
+        ts = await daemon._slack.post_text(session.channel_id, text, session.thread_ts)
+        daemon._todo_msgs[session.session_id] = ts
+    except Exception:
+        logger.debug("Todo post failed", exc_info=True)
+
+
 def _read_last_turn_from_jsonl(conv_parser, session_id: str, cwd: str) -> str:
     """Read all assistant text from the last turn in the JSONL file.
 
@@ -367,6 +402,11 @@ def create_http_app(daemon) -> web.Application:
                     except Exception:
                         logger.debug("Failed to update approval message", exc_info=True)
 
+                # TodoWrite gets its own persistent, in-place updated message
+                if tool_name == "TodoWrite":
+                    await _post_or_update_todos(daemon, session, tool_input.get("todos", []))
+                    return web.Response(text="ok")
+
                 # Tool/Skill status — different emoji for skills
                 is_skill = tool_name == "Skill"
                 if is_skill:
@@ -384,6 +424,9 @@ def create_http_app(daemon) -> web.Application:
             elif hook_type == "stop" and daemon._slack and session.channel_id:
                 # Stop JSONL watcher FIRST — prevents race with finalize
                 daemon._file_watcher.unwatch(session.session_id)
+
+                # Forget the per-turn todo message so the next turn starts fresh
+                daemon._todo_msgs.pop(session.session_id, None)
 
                 # Clear thread status (stop glowing)
                 await daemon._slack.set_thread_status(
@@ -459,6 +502,7 @@ def create_http_app(daemon) -> web.Application:
                 )
             daemon._session_mgr.set_mode(session_key, SessionMode.IDLE)
             daemon._progress.pop(session_key, None)
+            daemon._todo_msgs.pop(session_key, None)
         return web.Response(text="ok")
 
     @routes.post("/hooks/notification")
@@ -529,6 +573,10 @@ def create_http_app(daemon) -> web.Application:
         tool_name = payload.get("tool_name", "")
         tool_input = payload.get("tool_input", {})
         cwd = payload.get("cwd", "")
+        logger.info(
+            "Hook received: permission-request session=%s tool=%s",
+            session_key[:12] if session_key else "?", tool_name,
+        )
 
         # Fast-path: YOLO mode
         if daemon._yolo_mode:

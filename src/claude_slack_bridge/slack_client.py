@@ -80,6 +80,10 @@ class SlackClient:
         resp = await self._web.chat_postMessage(**kwargs)
         return resp["ts"]
 
+    async def update_text(self, channel: str, ts: str, text: str) -> None:
+        """Update an existing plain-text message."""
+        await self._web.chat_update(channel=channel, ts=ts, text=text)
+
     async def create_channel(self, name: str) -> tuple[str, bool]:
         """Create a channel. Returns (channel_id, created).
         If channel already exists, returns (existing_id, False).
