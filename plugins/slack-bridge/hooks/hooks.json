@@ -27,7 +27,7 @@
     ],
     "PermissionRequest": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|ExitPlanMode|TodoWrite|WebFetch|WebSearch|Task|Agent|Skill|mcp__.*",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
