@@ -18,7 +18,7 @@ class BridgeConfig:
     auto_approve_tools: list[str] = field(default_factory=lambda: ["Read", "Glob", "Grep"])
     session_archive_after_secs: int = 86400
     log_level: str = "INFO"
-    max_concurrent_sessions: int = 3
+    max_concurrent_sessions: int = 5
     process_idle_timeout_secs: int = 600  # kill idle --print process after 10min
     claude_args: list[str] = field(default_factory=list)
     work_dir: str = ""  # cwd for claude processes; empty = home dir
@@ -81,7 +81,7 @@ def load_config(config_dir: Path | None = None) -> BridgeConfig:
         auto_approve_tools=file_data.get("auto_approve_tools", ["Read", "Glob", "Grep"]),
         session_archive_after_secs=file_data.get("session_archive_after_secs", 86400),
         log_level=file_data.get("log_level", "INFO"),
-        max_concurrent_sessions=file_data.get("max_concurrent_sessions", 3),
+        max_concurrent_sessions=file_data.get("max_concurrent_sessions", 5),
         process_idle_timeout_secs=file_data.get("process_idle_timeout_secs", 600),
         claude_args=file_data.get("claude_args", []),
         work_dir=file_data.get("work_dir", str(Path.home())),
