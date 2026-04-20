@@ -108,7 +108,9 @@ class Daemon(StreamMixin, EventsMixin):
         blocks = build_session_header_blocks(
             session_id=session_id, directory=self._config.work_dir
         )
-        await self._slack.post_blocks(channel_id, blocks, f"Session: {name}", thread_ts)
+        await self._slack.post_blocks(
+            channel_id, blocks, f"Session {session_id[:12]} — {name}", thread_ts
+        )
 
         session = self._session_mgr.create(
             session_id=session_id,
@@ -168,7 +170,9 @@ class Daemon(StreamMixin, EventsMixin):
             cwd = session.cwd or self._config.work_dir
             blocks = build_session_header_blocks(session_id=session.session_id, directory=cwd)
             await self._slack.post_blocks(
-                channel_id, blocks, f"Resumed: {session.session_name}", thread_ts
+                channel_id, blocks,
+                f"Resumed {session.session_id[:12]} — {session.session_name}",
+                thread_ts,
             )
             follow_up = " ".join(parts[2:]) if len(parts) > 2 else None
             await self._resume_process(session, follow_up)
@@ -226,7 +230,7 @@ class Daemon(StreamMixin, EventsMixin):
                 session_id=session_key, directory=cwd or self._config.work_dir
             )
             thread_ts = await self._slack.post_blocks(
-                dm_channel, blocks, f"Session: {name}"
+                dm_channel, blocks, f"Session {session_key[:12]} — {name}"
             )
 
             session = self._session_mgr.create(

@@ -165,7 +165,7 @@ def create_http_app(daemon) -> web.Application:
             # New session — post header as thread root
             blocks = build_session_header_blocks(session_id=session_id, directory=cwd)
             thread_ts = await daemon._slack.post_blocks(
-                dm_channel, blocks, f"Session: {session_name}"
+                dm_channel, blocks, f"Session {session_id[:12]} — {session_name}"
             )
             if not session:
                 session = daemon._session_mgr.create(
