@@ -20,16 +20,30 @@ class ApprovalState:
         self.tool_input = tool_input or {}
         self.cwd = cwd
         self.session_id = session_id
-        self.status: str = "pending"  # pending | approved | rejected | timed_out
+        self.status: str = "pending"  # pending | approved | trusted | rejected | timed_out
+        self.trust_tool_name: str = ""
+        self.trust_rule_content: str | None = None
+        self.trust_destination: str = "projectSettings"
         self._event = asyncio.Event()
         self._resolved = False
 
-    def resolve(self, decision: str) -> bool:
+    def resolve(
+        self,
+        decision: str,
+        *,
+        trust_tool_name: str = "",
+        trust_rule_content: str | None = None,
+        trust_destination: str = "projectSettings",
+    ) -> bool:
         """Atomically resolve. Returns True if this was the first resolution."""
         if self._resolved:
             return False
         self._resolved = True
         self.status = decision
+        if decision == "trusted":
+            self.trust_tool_name = trust_tool_name
+            self.trust_rule_content = trust_rule_content
+            self.trust_destination = trust_destination
         self._event.set()
         return True
 

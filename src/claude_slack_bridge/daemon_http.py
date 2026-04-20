@@ -651,13 +651,14 @@ def create_http_app(daemon) -> web.Application:
             session.channel_id, session.thread_ts, ""
         )
 
-        if result == "approved":
-            return web.Response(text="approved")
-        elif result == "rejected":
-            return web.Response(text="rejected")
-        else:
-            # Timed out — return "timeout" so hook falls through to TUI prompt
-            return web.Response(text="timeout")
+        if result == "trusted":
+            return web.json_response({
+                "decision": "trusted",
+                "tool_name": state.trust_tool_name,
+                "rule_content": state.trust_rule_content,
+                "destination": state.trust_destination,
+            })
+        return web.json_response({"decision": result})
 
     app = web.Application()
     app.router.add_routes(routes)

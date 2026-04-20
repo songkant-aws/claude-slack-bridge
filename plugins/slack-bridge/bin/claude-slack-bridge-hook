@@ -154,8 +154,18 @@ def main():
         # Block and wait for Slack approval, return decision to Claude Code.
         # This replaces TUI's built-in approval prompt.
         timeout = load_approval_timeout() + 10
-        result = post_to_daemon(endpoint, payload, port, timeout)
-        if result == "rejected":
+        raw = post_to_daemon(endpoint, payload, port, timeout)
+        # Newer daemons reply JSON; older ones reply plain text — support both.
+        decision = raw
+        extra = {}
+        if raw and raw.startswith("{"):
+            try:
+                parsed = json.loads(raw)
+                decision = parsed.get("decision", "")
+                extra = parsed
+            except json.JSONDecodeError:
+                decision = raw
+        if decision == "rejected":
             output = {
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
@@ -167,7 +177,7 @@ def main():
             }
             print(json.dumps(output))
             sys.exit(0)
-        elif result == "approved":
+        elif decision == "approved":
             output = {
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
@@ -176,8 +186,34 @@ def main():
             }
             print(json.dumps(output))
             sys.exit(0)
+        elif decision == "trusted":
+            # Trust = allow this invocation AND persist a rule via CC's
+            # updatedPermissions so future matching calls don't even
+            # fire the hook (mirrors TUI's "Yes, don't ask again").
+            rule = {"toolName": extra.get("tool_name") or "Bash"}
+            if extra.get("rule_content"):
+                rule["ruleContent"] = extra["rule_content"]
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "allow",
+                        "updatedPermissions": [
+                            {
+                                "type": "addRules",
+                                "rules": [rule],
+                                "behavior": "allow",
+                                "destination": extra.get("destination") or "projectSettings",
+                            }
+                        ],
+                    },
+                }
+            }
+            print(json.dumps(output))
+            sys.exit(0)
         else:
-            # Daemon unreachable or timeout — fall through to TUI prompt
+            # Daemon unreachable, timeout, or unknown decision — fall
+            # through to TUI prompt.
             sys.exit(0)
     else:
         post_to_daemon(endpoint, payload, port, timeout=5)

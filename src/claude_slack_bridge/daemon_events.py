@@ -280,29 +280,28 @@ class EventsMixin:
                         except Exception:
                             logger.debug("Failed to update options message", exc_info=True)
         elif action_id == "trust_tool":
-            # "Trust" = write settings.json permissions.allow so CC
-            # itself auto-approves future invocations of this tool
-            # (matches the TUI's "Yes, don't ask again" option).
+            # "Trust" = tell CC to persist an allow rule (equivalent to
+            # the TUI's "Yes, don't ask again"). The hook script will
+            # emit updatedPermissions → addRules and CC writes the
+            # settings.json scope we specify.
             state = self._approval_mgr.get(value)
-            rule = "?"
-            settings_path = None
+            rule_label = "?"
             if state:
-                from claude_slack_bridge.permissions import (
-                    add_allow_rule, build_allow_rule,
+                from claude_slack_bridge.permissions import build_allow_rule, format_rule
+                tool_name, rule_content = build_allow_rule(state.tool_name, state.tool_input)
+                rule_label = format_rule(tool_name, rule_content)
+                state.resolve(
+                    "trusted",
+                    trust_tool_name=tool_name,
+                    trust_rule_content=rule_content,
+                    trust_destination="projectSettings",
                 )
-                rule = build_allow_rule(state.tool_name, state.tool_input)
-                try:
-                    settings_path, _added = add_allow_rule(state.cwd, rule)
-                except OSError:
-                    logger.warning("Failed to write permissions.allow", exc_info=True)
-                state.resolve("approved")
             if self._slack and channel_id and msg_ts:
-                blocks = build_approval_resolved_blocks("Rule", "trusted", rule)
+                blocks = build_approval_resolved_blocks("Rule", "trusted", rule_label)
                 try:
-                    scope = "project" if settings_path and ".claude/settings.json" in str(settings_path) and str(settings_path).startswith(state.cwd) else "user"
                     await self._slack.update_blocks(
                         channel_id, msg_ts, blocks,
-                        text=f"\U0001f91d Trusted `{rule}` ({scope} scope)",
+                        text=f"\U0001f91d Trusted `{rule_label}`",
                     )
                 except Exception:
                     logger.debug("Failed to update trust message", exc_info=True)
