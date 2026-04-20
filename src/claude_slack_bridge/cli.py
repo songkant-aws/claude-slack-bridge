@@ -15,6 +15,24 @@ _RC_MARKER = "# claude-slack-bridge"
 _LOCAL_BIN = Path.home() / ".local" / "bin"
 
 
+def _read_env_tokens(env_file: Path) -> tuple[str, str]:
+    """Return (app_token, bot_token) already on disk, empty strings if missing."""
+    if not env_file.is_file():
+        return "", ""
+    app_tok = ""
+    bot_tok = ""
+    for line in env_file.read_text().splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k == "SLACK_APP_TOKEN":
+            app_tok = v
+        elif k == "SLACK_BOT_TOKEN":
+            bot_tok = v
+    return app_tok, bot_tok
+
+
 @click.group()
 def main() -> None:
     """Claude Slack Bridge — bridge Claude Code sessions to Slack."""
@@ -27,8 +45,14 @@ def init() -> None:
     config_dir = Path.home() / ".claude" / "slack-bridge"
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    app_token = click.prompt("Slack App Token (xapp-...)", default="", show_default=False)
-    bot_token = click.prompt("Slack Bot Token (xoxb-...)", default="", show_default=False)
+    env_file = config_dir / ".env"
+    existing_app, existing_bot = _read_env_tokens(env_file)
+
+    hint = "(press enter to keep existing)" if existing_app or existing_bot else ""
+    prompt_app = f"Slack App Token (xapp-...) {hint}".rstrip()
+    prompt_bot = f"Slack Bot Token (xoxb-...) {hint}".rstrip()
+    app_token = click.prompt(prompt_app, default="", show_default=False) or existing_app
+    bot_token = click.prompt(prompt_bot, default="", show_default=False) or existing_bot
 
     if app_token and bot_token:
         click.echo("Validating tokens...")
@@ -49,9 +73,11 @@ def init() -> None:
             if not click.confirm("Continue with invalid tokens?"):
                 raise SystemExit(1)
 
-    env_file = config_dir / ".env"
-    env_file.write_text(f"SLACK_APP_TOKEN={app_token}\nSLACK_BOT_TOKEN={bot_token}\n")
-    click.echo(f"Tokens saved to {env_file}")
+    if app_token != existing_app or bot_token != existing_bot:
+        env_file.write_text(f"SLACK_APP_TOKEN={app_token}\nSLACK_BOT_TOKEN={bot_token}\n")
+        click.echo(f"Tokens saved to {env_file}")
+    else:
+        click.echo(f"Tokens unchanged ({env_file})")
 
     config_file = config_dir / "config.json"
     if not config_file.exists():
@@ -234,29 +260,35 @@ def stop() -> None:
 def _stop_daemon() -> bool:
     """Send SIGTERM to a running daemon and wait briefly for it to exit.
 
-    Returns True if we stopped a running daemon (or it was already gone).
+    Returns True if the port is free when we're done.
     """
     import signal
     import time as _time
 
     cfg = load_config()
     pid_file = cfg.config_dir / "daemon.pid"
-    if not pid_file.is_file():
-        click.echo("No PID file found. Daemon may not be running.")
-        return True
-    try:
-        pid = int(pid_file.read_text().strip())
-    except ValueError:
-        pid_file.unlink(missing_ok=True)
-        return True
+    pid: int | None = None
+    if pid_file.is_file():
+        try:
+            pid = int(pid_file.read_text().strip())
+        except ValueError:
+            pid_file.unlink(missing_ok=True)
+
+    # Fallback: no valid pid file but port still bound — find owner by port.
+    if pid is None:
+        pid = _find_pid_by_port(cfg.daemon_port)
+        if pid is None:
+            click.echo("Daemon not running.")
+            return True
+        click.echo(f"No PID file, but port {cfg.daemon_port} is held by PID {pid}")
+
     try:
         os.kill(pid, signal.SIGTERM)
         click.echo(f"Sent SIGTERM to daemon (PID {pid})")
     except ProcessLookupError:
-        click.echo("Daemon not running (stale PID file)")
+        click.echo("Daemon not running (stale reference)")
         pid_file.unlink(missing_ok=True)
         return True
-    # Wait up to 5s for the process to exit.
     for _ in range(50):
         try:
             os.kill(pid, 0)
@@ -265,6 +297,25 @@ def _stop_daemon() -> bool:
             return True
     click.echo(f"Daemon (PID {pid}) did not exit within 5s.", err=True)
     return False
+
+
+def _find_pid_by_port(port: int) -> int | None:
+    """Best-effort: find the PID listening on the given localhost TCP port."""
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ss", "-tlnp"], capture_output=True, text=True, timeout=3, check=False,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        if f":{port} " not in line:
+            continue
+        m = re.search(r"pid=(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 @main.command()
