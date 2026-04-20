@@ -34,7 +34,7 @@ fi
 
 RESULT=$(curl -s -X POST http://127.0.0.1:7778/sessions/bind \
   -H "Content-Type: application/json" \
-  -d "{\"session_id\": \"$SESSION_ID\", \"name\": \"TUI-${SESSION_ID:0:12}\", \"cwd\": \"$PWD\"}")
+  -d "{\"session_id\": \"$SESSION_ID\", \"name\": \"TUI-${SESSION_ID:0:12}\", \"cwd\": \"$PWD\", \"tmux_pane_id\": \"${TMUX_PANE:-}\"}")
 echo "$RESULT" | grep -q '"ok"' && echo "✅ Session $SESSION_ID bound to Slack" || echo "⚠️ Bind: $RESULT"
 
 # Step 3: Unmute in case it was muted

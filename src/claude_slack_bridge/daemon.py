@@ -50,8 +50,10 @@ class Daemon(StreamMixin, EventsMixin):
         self._seen = SeenCache()
         # Queued messages: session_id -> [text, ...]
         self._queued: dict[str, list[str]] = {}
-        # Sessions with TUI→Slack sync muted
-        self._tui_sync_muted: set[str] = set()
+        # Sessions with TUI→Slack sync muted. Persisted so /sync-off
+        # survives daemon restart.
+        self._muted_path = config.config_dir / "muted.json"
+        self._tui_sync_muted: set[str] = self._load_muted()
         # Prompts forwarded from Slack→tmux — skip echo back via UserPromptSubmit hook
         # Capped at 50 entries; cleared entirely when exceeded (older entries are stale)
         self._forwarded_prompts: set[str] = set()
@@ -66,6 +68,33 @@ class Daemon(StreamMixin, EventsMixin):
         self._file_watcher = SessionFileWatcher(
             self._conv_parser, on_new_messages=self._on_jsonl_messages
         )
+
+    # ── Muted-state persistence ──
+
+    def _load_muted(self) -> set[str]:
+        try:
+            if self._muted_path.is_file():
+                data = json.loads(self._muted_path.read_text())
+                if isinstance(data, list):
+                    return set(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return set()
+
+    def _save_muted(self) -> None:
+        try:
+            self._muted_path.parent.mkdir(parents=True, exist_ok=True)
+            self._muted_path.write_text(json.dumps(sorted(self._tui_sync_muted)))
+        except OSError:
+            logger.debug("Failed to persist muted set", exc_info=True)
+
+    def mute_session(self, session_id: str) -> None:
+        self._tui_sync_muted.add(session_id)
+        self._save_muted()
+
+    def unmute_session(self, session_id: str) -> None:
+        self._tui_sync_muted.discard(session_id)
+        self._save_muted()
 
     # ── Session cleanup ──
 
@@ -243,7 +272,7 @@ class Daemon(StreamMixin, EventsMixin):
             session.cwd = cwd
             session.origin = "tui"
             session.tmux_pane_id = tmux_pane_id
-            self._tui_sync_muted.add(session_key)
+            self.mute_session(session_key)
             logger.info("Auto-bound TUI session %s to DM %s (muted by default)", session_key, dm_channel)
             return session
         except Exception:
@@ -363,5 +392,12 @@ class Daemon(StreamMixin, EventsMixin):
             await self._socket_client.close()
         if self._runner:
             await self._runner.cleanup()
+        # Only remove the pid file if it still points at us; a racing
+        # second start that SystemExit'd on port-in-use must not unlink
+        # the file written by the first, healthy instance.
         pid_file = self._config.config_dir / "daemon.pid"
-        pid_file.unlink(missing_ok=True)
+        try:
+            if pid_file.is_file() and pid_file.read_text().strip() == str(os.getpid()):
+                pid_file.unlink()
+        except OSError:
+            pass

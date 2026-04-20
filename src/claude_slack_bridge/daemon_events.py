@@ -200,11 +200,11 @@ class EventsMixin:
             await self._slack.post_text(channel_id, "\U0001f512 YOLO/Trust mode disabled", thread_ts)
             return
         if lower == "sync off":
-            self._tui_sync_muted.add(session.session_id)
+            self.mute_session(session.session_id)
             await self._slack.post_text(channel_id, "\U0001f507 TUI sync muted for this session", thread_ts)
             return
         if lower == "sync on":
-            self._tui_sync_muted.discard(session.session_id)
+            self.unmute_session(session.session_id)
             await self._slack.post_text(channel_id, "\U0001f50a TUI sync resumed for this session", thread_ts)
             return
 

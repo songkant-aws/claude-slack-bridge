@@ -139,6 +139,7 @@ def create_http_app(daemon) -> web.Application:
         session_id = payload.get("session_id", "")
         session_name = payload.get("name", session_id[:12])
         cwd = payload.get("cwd", daemon._config.work_dir)
+        tmux_pane_id = payload.get("tmux_pane_id", "")
 
         if not daemon._slack or not daemon._bot_user_id:
             return web.json_response({"error": "slack not connected"}, status=503)
@@ -182,6 +183,8 @@ def create_http_app(daemon) -> web.Application:
                 daemon._session_mgr._save()
         session.cwd = cwd
         session.origin = "tui"
+        if tmux_pane_id:
+            session.tmux_pane_id = tmux_pane_id
 
         return web.json_response({
             "ok": True,
@@ -196,9 +199,9 @@ def create_http_app(daemon) -> web.Application:
         payload = await req.json()
         muted = payload.get("muted", True)
         if muted:
-            daemon._tui_sync_muted.add(sid)
+            daemon.mute_session(sid)
         else:
-            daemon._tui_sync_muted.discard(sid)
+            daemon.unmute_session(sid)
         return web.json_response({"ok": True, "muted": muted})
 
     @routes.post("/hooks/{hook_type}")

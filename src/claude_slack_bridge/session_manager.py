@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("claude_slack_bridge")
 
 
 class SessionMode(str, Enum):
@@ -75,6 +78,12 @@ class SessionManager:
             if sess.status == "active" and sess.cwd == session_id:
                 if best is None or sess.last_active > best.last_active:
                     best = sess
+        if best is not None:
+            logger.warning(
+                "Session lookup for %r matched via cwd fallback → %s "
+                "(cross-session risk if multiple sessions share cwd)",
+                session_id, best.session_id,
+            )
         return best
 
     def find_by_thread(self, channel_id: str, thread_ts: str) -> Session | None:
