@@ -110,14 +110,33 @@ _PERMISSION_HOOK_MARKER = "claude-slack-bridge:PermissionRequest"
 
 
 def _find_plugin_hook_script() -> Path | None:
-    """Locate the plugin's hook binary in the Claude Code plugin cache."""
+    """Locate the plugin's hook binary in the Claude Code plugin cache.
+
+    Prefer the `installPath` recorded by Claude Code in
+    `~/.claude/plugins/installed_plugins.json` — that's the cache dir
+    CC actually loads. Fall back to the newest-mtime dir, then to
+    the lexicographically largest one (multiple updates in the same
+    second can share an mtime, making `max` non-deterministic).
+    """
+    installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    if installed_json.is_file():
+        try:
+            data = json.loads(installed_json.read_text())
+            entries = data.get("plugins", {}).get("slack-bridge@qianheng-plugins", [])
+            for entry in entries:
+                script = Path(entry.get("installPath", "")) / "bin" / "claude-slack-bridge-hook"
+                if script.is_file():
+                    return script
+        except (OSError, json.JSONDecodeError):
+            pass
+
     cache = Path.home() / ".claude" / "plugins" / "cache" / "qianheng-plugins" / "slack-bridge"
     if not cache.is_dir():
         return None
     versions = [v for v in cache.iterdir() if v.is_dir()]
     if not versions:
         return None
-    latest = max(versions, key=lambda v: v.stat().st_mtime)
+    latest = max(versions, key=lambda v: (v.stat().st_mtime, v.name))
     script = latest / "bin" / "claude-slack-bridge-hook"
     return script if script.is_file() else None
 
@@ -157,7 +176,7 @@ def _install_permission_request_hook() -> None:
         "hooks": [{
             "type": "command",
             "command": f"{script} PermissionRequest",
-            "timeout": 86410000,
+            "timeout": 86400,  # seconds — ~24h, effectively wait forever
         }],
     })
     hooks["PermissionRequest"] = entries
