@@ -139,9 +139,9 @@ class Daemon(StreamMixin, EventsMixin):
         blocks = build_session_header_blocks(
             session_id=session_id, directory=self._config.work_dir
         )
-        await self._slack.post_blocks(
-            channel_id, blocks, f"Session {session_id[:12]} — {name}", thread_ts
-        )
+        basename = os.path.basename(self._config.work_dir.rstrip("/")) if self._config.work_dir else ""
+        fallback = f"{basename} @ {session_id[:12]}" if basename else f"Session {session_id[:12]}"
+        await self._slack.post_blocks(channel_id, blocks, fallback, thread_ts)
 
         session = self._session_mgr.create(
             session_id=session_id,
@@ -257,12 +257,13 @@ class Daemon(StreamMixin, EventsMixin):
             dm_channel = ims[0]["id"]
 
             name = f"TUI-{session_key[:12]}"
+            directory = cwd or self._config.work_dir
             blocks = build_session_header_blocks(
-                session_id=session_key, directory=cwd or self._config.work_dir
+                session_id=session_key, directory=directory
             )
-            thread_ts = await self._slack.post_blocks(
-                dm_channel, blocks, f"Session {session_key[:12]} — {name}"
-            )
+            basename = os.path.basename(directory.rstrip("/")) if directory else ""
+            fallback = f"{basename} @ {session_key[:12]}" if basename else f"Session {session_key[:12]}"
+            thread_ts = await self._slack.post_blocks(dm_channel, blocks, fallback)
 
             session = self._session_mgr.create(
                 session_id=session_key,

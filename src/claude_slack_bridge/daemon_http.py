@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 
@@ -200,9 +201,9 @@ def create_http_app(daemon) -> web.Application:
         else:
             # New session — post header as thread root
             blocks = build_session_header_blocks(session_id=session_id, directory=cwd)
-            thread_ts = await daemon._slack.post_blocks(
-                dm_channel, blocks, f"Session {session_id[:12]} — {session_name}"
-            )
+            basename = os.path.basename(cwd.rstrip("/")) if cwd else ""
+            fallback = f"{basename} @ {session_id[:12]}" if basename else f"Session {session_id[:12]}"
+            thread_ts = await daemon._slack.post_blocks(dm_channel, blocks, fallback)
             if not session:
                 session = daemon._session_mgr.create(
                     session_id=session_id,
