@@ -79,6 +79,20 @@ def init() -> None:
     else:
         click.echo(f"Tokens unchanged ({env_file})")
 
+    _refresh_defaults(config_dir)
+
+    click.echo(
+        "\nSetup complete! Install the Claude Code plugin to wire up hooks:\n"
+        "  claude plugins install slack-bridge@qianheng-plugins\n"
+        "Then run 'claude-slack-bridge start' to launch the daemon."
+    )
+
+
+def _refresh_defaults(config_dir: Path) -> None:
+    """Non-interactive side of `init`: config.json, launcher symlink, legacy cleanup.
+
+    Safe to re-run on every upgrade — all operations are idempotent.
+    """
     config_file = config_dir / "config.json"
     if not config_file.exists():
         # Minimal set of fields users are most likely to tweak; the rest
@@ -93,12 +107,6 @@ def init() -> None:
 
     _install_launcher()
     _remove_legacy_permission_hook()
-
-    click.echo(
-        "\nSetup complete! Install the Claude Code plugin to wire up hooks:\n"
-        "  claude plugins install slack-bridge@qianheng-plugins\n"
-        "Then run 'claude-slack-bridge start' to launch the daemon."
-    )
 
 
 # Older versions of init injected a `PermissionRequest` block into
@@ -341,6 +349,73 @@ def restart(daemonize: bool) -> None:
         _daemonize()
     from claude_slack_bridge.daemon import Daemon
     asyncio.run(Daemon(cfg).start())
+
+
+@main.command()
+@click.option(
+    "--skip-plugin",
+    is_flag=True,
+    help="Skip `claude plugins update` (use when the CLI isn't on PATH).",
+)
+def update(skip_plugin: bool) -> None:
+    """Sync daemon code, plugin cache, and launcher, then restart the daemon.
+
+    Run this after `git pull`. Collapses the four-step upgrade into one
+    command so you don't have to remember pip/plugins update/init/restart
+    ordering. You'll still need to restart your TUI afterward so it
+    re-reads the refreshed plugin cache.
+    """
+    import shutil
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    pip = Path(sys.executable).with_name("pip")
+
+    click.echo("→ [1/4] Installing Python package (editable)")
+    rc = subprocess.run(
+        [str(pip), "install", "-e", str(repo_root)],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        click.echo(rc.stderr, err=True)
+        click.echo("pip install failed — aborting.", err=True)
+        raise SystemExit(rc.returncode)
+
+    click.echo("→ [2/4] Refreshing Claude Code plugin cache")
+    if skip_plugin:
+        click.echo("  (skipped)")
+    elif not shutil.which("claude"):
+        click.echo(
+            "  `claude` not on PATH — skipping plugin cache refresh. "
+            "Run `claude plugins update slack-bridge@qianheng-plugins` manually."
+        )
+    else:
+        rc = subprocess.run(
+            ["claude", "plugins", "update", "slack-bridge@qianheng-plugins"],
+        )
+        if rc.returncode != 0:
+            click.echo(
+                "  `claude plugins update` exited with non-zero status — continuing anyway.",
+                err=True,
+            )
+
+    click.echo("→ [3/4] Refreshing launcher and config defaults")
+    config_dir = Path.home() / ".claude" / "slack-bridge"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _refresh_defaults(config_dir)
+
+    click.echo("→ [4/4] Restarting daemon")
+    unit = _find_systemd_unit()
+    if unit:
+        _systemctl_invoke(unit, "restart")
+    else:
+        _stop_daemon()
+        click.echo(
+            "  No systemd unit installed — start the daemon manually with "
+            "`claude-slack-bridge start -d` when ready."
+        )
+
+    click.echo("\n✅ Update complete. Restart your Claude Code TUI to pick up plugin changes.")
 
 
 @main.command()

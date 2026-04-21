@@ -12,7 +12,11 @@ from aiohttp.test_utils import AioHTTPTestCase, TestClient
 from claude_slack_bridge.config import BridgeConfig
 from claude_slack_bridge.conversation_parser import ConversationParser
 from claude_slack_bridge.daemon import Daemon
-from claude_slack_bridge.daemon_http import create_http_app, _read_last_turn_from_jsonl
+from claude_slack_bridge.daemon_http import (
+    _maybe_warn_version_mismatch,
+    _read_last_turn_from_jsonl,
+    create_http_app,
+)
 from claude_slack_bridge.session_manager import SessionManager, SessionMode
 
 
@@ -316,3 +320,43 @@ def test_mute_unmute_roundtrip_persists_to_disk(config: BridgeConfig) -> None:
     reborn.unmute_session("s1")
     assert reborn._tui_sync_muted == {"s2"}
     assert json.loads(muted_path.read_text()) == ["s2"]
+
+
+# ── Version mismatch warning ──
+
+
+async def test_version_mismatch_posts_warning_once(config: BridgeConfig) -> None:
+    """Plugin/daemon version drift triggers exactly one Slack warning per pair."""
+    daemon = Daemon(config)
+    daemon._slack = MagicMock()
+    daemon._slack.post_text = AsyncMock()
+
+    # Drift the plugin version relative to the daemon's own __version__.
+    from claude_slack_bridge import __version__ as daemon_version
+    stale_plugin = "0.0.0-stale"
+    assert stale_plugin != daemon_version
+
+    await _maybe_warn_version_mismatch(daemon, "C1", "t1", stale_plugin)
+    await _maybe_warn_version_mismatch(daemon, "C1", "t1", stale_plugin)
+
+    # First call warns; second call is suppressed because the (plugin, daemon)
+    # pair hasn't changed — otherwise every SessionStart spams the thread.
+    assert daemon._slack.post_text.await_count == 1
+    warning = daemon._slack.post_text.await_args.args[1]
+    assert "Version mismatch" in warning
+    assert stale_plugin in warning
+    assert daemon_version in warning
+
+
+async def test_version_mismatch_silent_when_matching(config: BridgeConfig) -> None:
+    """No warning when plugin_version == daemon __version__, or when empty."""
+    from claude_slack_bridge import __version__ as daemon_version
+
+    daemon = Daemon(config)
+    daemon._slack = MagicMock()
+    daemon._slack.post_text = AsyncMock()
+
+    await _maybe_warn_version_mismatch(daemon, "C1", "t1", daemon_version)
+    await _maybe_warn_version_mismatch(daemon, "C1", "t1", "")
+
+    assert daemon._slack.post_text.await_count == 0

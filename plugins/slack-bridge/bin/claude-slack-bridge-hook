@@ -37,6 +37,28 @@ def load_approval_timeout():
     return 300
 
 
+_PLUGIN_VERSION_CACHE = None
+
+
+def load_plugin_version():
+    """Read `version` from the plugin manifest alongside this script.
+
+    The hook lives at `<plugin>/bin/claude-slack-bridge-hook`; the manifest
+    sits at `<plugin>/.claude-plugin/plugin.json`. Empty string if anything
+    goes wrong — version mismatch warning degrades gracefully.
+    """
+    global _PLUGIN_VERSION_CACHE
+    if _PLUGIN_VERSION_CACHE is not None:
+        return _PLUGIN_VERSION_CACHE
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        with open(manifest) as f:
+            _PLUGIN_VERSION_CACHE = json.load(f).get("version", "") or ""
+    except (OSError, json.JSONDecodeError):
+        _PLUGIN_VERSION_CACHE = ""
+    return _PLUGIN_VERSION_CACHE
+
+
 def derive_session_key(hook_json):
     """Derive session key from hook stdin JSON."""
     if sid := hook_json.get("session_id"):
@@ -76,6 +98,8 @@ def build_payload(event_type, stdin_json):
         payload["message"] = stdin_json.get("message", "")
     if event_type == "pre-compact":
         payload["compact_type"] = stdin_json.get("compact_type", "auto")
+    if event_type == "session-start":
+        payload["plugin_version"] = load_plugin_version()
     return payload
 
 

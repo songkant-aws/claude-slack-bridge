@@ -139,29 +139,21 @@ Open a new shell (or `source ~/.bashrc` / `~/.zshrc`) so `~/.local/bin` is on `P
 
 ## Updating
 
-After pulling a new version of this repo, three layers need to catch up. Run these from the repo root:
+After pulling a new version of this repo, one command syncs everything:
 
 ```bash
-# 1. Update Python dependencies (only needed if pyproject.toml changed)
-.venv/bin/pip install -e .
-
-# 2. Refresh the plugin cache from the local marketplace
-claude plugins update slack-bridge@qianheng-plugins
-
-# 3. Re-run init to pick up new launcher paths / default config
-#    changes (also cleans up hook entries left by older versions)
-.venv/bin/claude-slack-bridge init
-
-# 4. Restart the daemon to pick up new daemon code.
-#    `restart` detects a systemd unit and delegates to `systemctl` —
-#    no need to choose a path manually. Use `systemctl restart` directly
-#    if you prefer.
-claude-slack-bridge restart -d
+git pull
+claude-slack-bridge update
 ```
 
-> **Why this matters**: if both `systemd` and a manual `claude-slack-bridge start -d` try to bind port 7778 simultaneously, the logs flood with `Port 7778 in use`. The `restart` command now delegates to `systemctl` when a unit is installed, avoiding that loop.
+`update` runs the four steps that used to be manual:
 
-Finally, **restart the Claude Code TUI** so it re-reads the plugin's `hooks.json` and any new hook entries in `~/.claude/settings.json`.
+1. `pip install -e .` — refresh the Python daemon
+2. `claude plugins update slack-bridge@qianheng-plugins` — refresh the plugin cache (`~/.claude/plugins/cache/…`) that the TUI actually reads from
+3. Refresh the `~/.local/bin/claude-slack-bridge` symlink and migrate default config
+4. Restart the daemon (delegates to `systemctl` when a unit is installed)
+
+Finally, **restart the Claude Code TUI** so it re-reads the refreshed plugin cache. The daemon and the TUI each carry their own version (`plugin.json` and `__version__`); when they drift, the next `SessionStart` hook posts a mismatch warning in Slack so you don't silently run a half-upgraded setup.
 
 ## Features
 

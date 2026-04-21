@@ -30,6 +30,37 @@ from claude_slack_bridge.slack_formatter import (
 _SLACK_MAX_TEXT = SLACK_MSG_LIMIT
 
 
+async def _maybe_warn_version_mismatch(
+    daemon, channel_id: str, thread_ts: str, plugin_version: str
+) -> None:
+    """Post a one-time warning when the TUI-side plugin and the daemon
+    were installed from different versions of the repo. Repeats only if
+    the mismatched version changes (so the nag doesn't fire every session
+    start) and suppresses itself when either side omits a version.
+    """
+    from claude_slack_bridge import __version__ as daemon_version
+
+    if not plugin_version or not daemon_version:
+        return
+    if plugin_version == daemon_version:
+        return
+    # Only warn once per distinct mismatch pair so every session-start
+    # doesn't spam the thread.
+    last = getattr(daemon, "_last_version_warning", None)
+    pair = (plugin_version, daemon_version)
+    if last == pair:
+        return
+    daemon._last_version_warning = pair
+    await daemon._slack.post_text(
+        channel_id,
+        (
+            f"⚠️ Version mismatch: plugin `{plugin_version}` ↔ daemon `{daemon_version}`. "
+            "Run `claude-slack-bridge update` and restart the TUI to resync."
+        ),
+        thread_ts,
+    )
+
+
 def _format_todos(todos: list[dict]) -> str:
     """Render a TodoWrite todo list into a Slack-friendly checklist."""
     if not todos:
@@ -136,7 +167,8 @@ def create_http_app(daemon) -> web.Application:
 
     @routes.get("/health")
     async def health(req: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        from claude_slack_bridge import __version__
+        return web.json_response({"status": "ok", "version": __version__})
 
     @routes.get("/sessions")
     async def list_sessions(req: web.Request) -> web.Response:
@@ -465,6 +497,7 @@ def create_http_app(daemon) -> web.Application:
         session_key = payload.get("session_key", "")
         cwd = payload.get("cwd", "")
         pane_id = payload.get("tmux_pane_id", "")
+        plugin_version = payload.get("plugin_version", "")
 
         session = daemon._session_mgr.get(session_key)
         if not session:
@@ -481,6 +514,9 @@ def create_http_app(daemon) -> web.Application:
                     session.channel_id,
                     "▶️ _Session started_",
                     session.thread_ts,
+                )
+                await _maybe_warn_version_mismatch(
+                    daemon, session.channel_id, session.thread_ts, plugin_version,
                 )
         return web.Response(text="ok")
 
