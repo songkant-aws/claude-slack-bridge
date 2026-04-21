@@ -51,10 +51,14 @@ class Daemon(StreamMixin, EventsMixin):
         self._seen = SeenCache()
         # Queued messages: session_id -> [text, ...]
         self._queued: dict[str, list[str]] = {}
-        # Sessions with TUI→Slack sync muted. Persisted so /sync-off
-        # survives daemon restart.
+        # Per-session mute level. Persisted so /sync-off survives daemon restart.
+        #   "full" — nothing sent to Slack; permission requests fall through
+        #            to TUI's native approval dialog.
+        #   "ring" — sync chatter (prompts/progress/session lifecycle) silenced,
+        #            but permission requests still ring the Slack thread.
+        # Sessions not in the dict are unmuted.
         self._muted_path = config.config_dir / "muted.json"
-        self._tui_sync_muted: set[str] = self._load_muted()
+        self._mute_levels: dict[str, str] = self._load_muted()
         # Prompts forwarded from Slack→tmux — skip echo back via UserPromptSubmit hook
         # Capped at 50 entries; cleared entirely when exceeded (older entries are stale)
         self._forwarded_prompts: set[str] = set()
@@ -74,30 +78,47 @@ class Daemon(StreamMixin, EventsMixin):
 
     # ── Muted-state persistence ──
 
-    def _load_muted(self) -> set[str]:
+    _VALID_LEVELS = {"full", "ring"}
+
+    def _load_muted(self) -> dict[str, str]:
         try:
             if self._muted_path.is_file():
                 data = json.loads(self._muted_path.read_text())
-                if isinstance(data, list):
-                    return set(data)
+                if isinstance(data, dict):
+                    return {
+                        k: v for k, v in data.items()
+                        if isinstance(k, str) and v in self._VALID_LEVELS
+                    }
         except (OSError, json.JSONDecodeError):
             pass
-        return set()
+        return {}
 
     def _save_muted(self) -> None:
         try:
             self._muted_path.parent.mkdir(parents=True, exist_ok=True)
-            self._muted_path.write_text(json.dumps(sorted(self._tui_sync_muted)))
+            self._muted_path.write_text(
+                json.dumps(self._mute_levels, sort_keys=True)
+            )
         except OSError:
-            logger.debug("Failed to persist muted set", exc_info=True)
+            logger.debug("Failed to persist muted dict", exc_info=True)
 
-    def mute_session(self, session_id: str) -> None:
-        self._tui_sync_muted.add(session_id)
+    def mute_session(self, session_id: str, level: str = "full") -> None:
+        if level not in self._VALID_LEVELS:
+            raise ValueError(f"invalid mute level: {level!r}")
+        self._mute_levels[session_id] = level
         self._save_muted()
 
     def unmute_session(self, session_id: str) -> None:
-        self._tui_sync_muted.discard(session_id)
+        self._mute_levels.pop(session_id, None)
         self._save_muted()
+
+    def is_silenced(self, session_id: str) -> bool:
+        """True when any mute is active — used to gate ambient sync chatter."""
+        return session_id in self._mute_levels
+
+    def is_fully_muted(self, session_id: str) -> bool:
+        """True only for `full` mute — used to gate permission-request handoff."""
+        return self._mute_levels.get(session_id) == "full"
 
     # ── Session cleanup ──
 

@@ -117,8 +117,9 @@ Open a new shell (or `source ~/.bashrc` / `~/.zshrc`) so `~/.local/bin` is on `P
 
 | Command | Effect |
 |---------|--------|
-| `/slack-bridge:sync-on` | Start daemon + bind current session to Slack DM |
-| `/slack-bridge:sync-off` | Mute TUI→Slack sync for current session |
+| `/slack-bridge:sync-on` | Start daemon + bind current session to Slack DM (also unmutes) |
+| `/slack-bridge:sync-off` | Fully mute current session — permission requests fall back to the TUI dialog |
+| `/slack-bridge:sync-off --ring` | Silence sync chatter but keep Slack approval buttons active |
 | `/slack-bridge:start-daemon` | Start daemon only |
 | `/slack-bridge:stop-daemon` | Stop daemon |
 | `/slack-bridge:status` | Show status and active sessions |

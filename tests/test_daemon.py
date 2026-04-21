@@ -299,27 +299,138 @@ def test_forwarded_prompts_under_cap_not_cleared(config: BridgeConfig) -> None:
     assert len(daemon._forwarded_prompts) == 10
 
 
-# ── mute_session / unmute_session persistence ──
+# ── mute_session / unmute_session persistence + level semantics ──
 
 
 def test_mute_unmute_roundtrip_persists_to_disk(config: BridgeConfig) -> None:
-    """mute_session/unmute_session write muted.json and a fresh Daemon rehydrates it."""
+    """Mute levels survive daemon restart via muted.json dict format."""
     daemon = Daemon(config)
     muted_path = config.config_dir / "muted.json"
 
-    daemon.mute_session("s1")
-    daemon.mute_session("s2")
-    assert daemon._tui_sync_muted == {"s1", "s2"}
-    assert json.loads(muted_path.read_text()) == ["s1", "s2"]
+    daemon.mute_session("s1")             # default "full"
+    daemon.mute_session("s2", "ring")
+    assert daemon._mute_levels == {"s1": "full", "s2": "ring"}
+    assert json.loads(muted_path.read_text()) == {"s1": "full", "s2": "ring"}
 
     # Rehydrate — new Daemon instance reads muted.json via _load_muted().
     # Guards against NameError/import regressions in the persistence path.
     reborn = Daemon(config)
-    assert reborn._tui_sync_muted == {"s1", "s2"}
+    assert reborn._mute_levels == {"s1": "full", "s2": "ring"}
 
     reborn.unmute_session("s1")
-    assert reborn._tui_sync_muted == {"s2"}
-    assert json.loads(muted_path.read_text()) == ["s2"]
+    assert reborn._mute_levels == {"s2": "ring"}
+    assert json.loads(muted_path.read_text()) == {"s2": "ring"}
+
+
+def test_mute_level_predicates(config: BridgeConfig) -> None:
+    """is_silenced covers both levels; is_fully_muted only covers full."""
+    daemon = Daemon(config)
+    daemon.mute_session("full-sid", "full")
+    daemon.mute_session("ring-sid", "ring")
+
+    assert daemon.is_silenced("full-sid") and daemon.is_fully_muted("full-sid")
+    # ring silences ambient sync but must NOT fully-mute — permission requests
+    # still need to reach Slack.
+    assert daemon.is_silenced("ring-sid") and not daemon.is_fully_muted("ring-sid")
+    assert not daemon.is_silenced("other") and not daemon.is_fully_muted("other")
+
+
+def test_mute_invalid_level_rejected(config: BridgeConfig) -> None:
+    daemon = Daemon(config)
+    with pytest.raises(ValueError):
+        daemon.mute_session("s1", "bogus")
+
+
+async def test_mute_api_level_shape(config: BridgeConfig) -> None:
+    """POST /sessions/{id}/mute accepts only {level: full|ring|none}."""
+    daemon = Daemon(config)
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        # full
+        resp = await client.post("/sessions/s1/mute", json={"level": "full"})
+        assert resp.status == 200
+        assert (await resp.json())["level"] == "full"
+        assert daemon._mute_levels == {"s1": "full"}
+
+        # ring overrides full on same session
+        resp = await client.post("/sessions/s1/mute", json={"level": "ring"})
+        assert (await resp.json())["level"] == "ring"
+        assert daemon._mute_levels == {"s1": "ring"}
+
+        # none unmutes
+        resp = await client.post("/sessions/s1/mute", json={"level": "none"})
+        body = await resp.json()
+        assert body["ok"] is True and body["level"] is None
+        assert daemon._mute_levels == {}
+
+        # missing/invalid level → 400
+        resp = await client.post("/sessions/s1/mute", json={})
+        assert resp.status == 400
+        resp = await client.post("/sessions/s1/mute", json={"level": "bogus"})
+        assert resp.status == 400
+
+
+async def test_permission_request_full_mute_falls_through(config: BridgeConfig) -> None:
+    """full mute returns empty body so the hook falls through to TUI's dialog."""
+    daemon = Daemon(config)
+    daemon._slack = MagicMock()
+    daemon._slack.set_thread_status = AsyncMock()
+    daemon._slack.post_blocks = AsyncMock(return_value="ts.1")
+    daemon._session_mgr.create(
+        session_id="s1", session_name="t", channel_id="C1", thread_ts="1.0",
+        mode=SessionMode.HOOK,
+    )
+    daemon.mute_session("s1", "full")
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/hooks/permission-request", json={
+            "session_key": "s1", "tool_name": "Bash",
+            "tool_input": {"command": "rm file"}, "cwd": "/tmp",
+        })
+        assert resp.status == 200
+        assert (await resp.text()) == ""
+        # No Slack approval posted — TUI takes over.
+        daemon._slack.post_blocks.assert_not_awaited()
+
+
+async def test_permission_request_ring_mute_still_posts_to_slack(config: BridgeConfig) -> None:
+    """ring mute silences ambient sync but keeps permission-request buttons."""
+    daemon = Daemon(config)
+    daemon._slack = MagicMock()
+    daemon._slack.set_thread_status = AsyncMock()
+    daemon._slack.post_blocks = AsyncMock(return_value="ts.1")
+    daemon._session_mgr.create(
+        session_id="s1", session_name="t", channel_id="C1", thread_ts="1.0",
+        mode=SessionMode.HOOK,
+    )
+    daemon.mute_session("s1", "ring")
+
+    # Stub out the approval wait so we don't block the test.
+    original_create = daemon._approval_mgr.create
+    def _fake_create(request_id, **kwargs):
+        state = original_create(request_id, **kwargs)
+        state.resolve("approved")
+        return state
+    daemon._approval_mgr.create = _fake_create
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/hooks/permission-request", json={
+            "session_key": "s1", "tool_name": "Bash",
+            "tool_input": {"command": "rm file"}, "cwd": "/tmp",
+        })
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["decision"] == "approved"
+        # Buttons were posted despite ring mute.
+        daemon._slack.post_blocks.assert_awaited()
 
 
 # ── Version mismatch warning ──

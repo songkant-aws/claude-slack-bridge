@@ -188,7 +188,7 @@ def create_http_app(daemon) -> web.Application:
                 "last_active": s.last_active,
                 "age_secs": int(now - s.created_at),
                 "idle_secs": int(now - s.last_active),
-                "muted": s.session_id in daemon._tui_sync_muted,
+                "mute_level": daemon._mute_levels.get(s.session_id),
                 "trusted": s.session_id in daemon._trusted_sessions,
             }
             cp = daemon._pool.get(s.session_id)
@@ -265,12 +265,17 @@ def create_http_app(daemon) -> web.Application:
     async def mute_session(req: web.Request) -> web.Response:
         sid = req.match_info["session_id"]
         payload = await req.json()
-        muted = payload.get("muted", True)
-        if muted:
-            daemon.mute_session(sid)
-        else:
+        level = payload.get("level")
+        if level == "none":
             daemon.unmute_session(sid)
-        return web.json_response({"ok": True, "muted": muted})
+            return web.json_response({"ok": True, "level": None})
+        if level in ("full", "ring"):
+            daemon.mute_session(sid, level)
+            return web.json_response({"ok": True, "level": level})
+        return web.json_response(
+            {"ok": False, "error": "level must be one of: full, ring, none"},
+            status=400,
+        )
 
     @routes.post("/hooks/{hook_type}")
     async def hook_handler(req: web.Request) -> web.Response:
@@ -376,8 +381,9 @@ def create_http_app(daemon) -> web.Application:
         if session.origin != "tui":
             session.origin = "tui"
 
-        # Sync TUI content to Slack (unless muted)
-        if session.session_id not in daemon._tui_sync_muted:
+        # Sync TUI content to Slack (unless silenced by any mute level).
+        # Permission-request has its own gate (is_fully_muted) downstream.
+        if not daemon.is_silenced(session.session_id):
             if hook_type == "user-prompt" and daemon._slack and session.channel_id:
                 # New turn starting — clear stale state, start JSONL watcher
                 daemon._finalized_sessions.discard(session.session_id)
@@ -435,7 +441,7 @@ def create_http_app(daemon) -> web.Application:
                             text="\u2705 Approved in TUI"
                         )
                     except Exception:
-                        logger.debug("Failed to update approval message", exc_info=True)
+                        logger.warning("Failed to update approval message", exc_info=True)
 
                 # TodoWrite gets its own persistent, in-place updated message
                 if tool_name == "TodoWrite":
@@ -509,7 +515,7 @@ def create_http_app(daemon) -> web.Application:
             if pane_id:
                 session.tmux_pane_id = pane_id
             daemon._session_mgr.set_mode(session_key, SessionMode.HOOK)
-            if daemon._slack and session.channel_id and session.session_id not in daemon._tui_sync_muted:
+            if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
                 await daemon._slack.post_text(
                     session.channel_id,
                     "▶️ _Session started_",
@@ -533,7 +539,7 @@ def create_http_app(daemon) -> web.Application:
             # back to cwd/--resume instead of send-keys to a stale pane.
             session.tmux_pane_id = ""
             daemon._file_watcher.unwatch(session_key)
-            if daemon._slack and session.channel_id and session.session_id not in daemon._tui_sync_muted:
+            if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
                 await daemon._slack.post_text(
                     session.channel_id,
                     "⏹️ _Session ended_",
@@ -560,7 +566,7 @@ def create_http_app(daemon) -> web.Application:
         if notification_type == "permission_prompt":
             return web.Response(text="ok")
 
-        if daemon._slack and session.channel_id and session.session_id not in daemon._tui_sync_muted:
+        if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
             if notification_type == "idle_prompt":
                 await daemon._slack.post_text(
                     session.channel_id,
@@ -583,7 +589,7 @@ def create_http_app(daemon) -> web.Application:
         session = daemon._session_mgr.get(session_key)
         if session:
             session.touch()
-            if daemon._slack and session.channel_id and session.session_id not in daemon._tui_sync_muted:
+            if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
                 await daemon._update_progress(session, "🤖 _Subagent completed_")
         return web.Response(text="ok")
 
@@ -596,7 +602,7 @@ def create_http_app(daemon) -> web.Application:
         session = daemon._session_mgr.get(session_key)
         if session:
             session.touch()
-            if daemon._slack and session.channel_id and session.session_id not in daemon._tui_sync_muted:
+            if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
                 await daemon._slack.post_text(
                     session.channel_id,
                     f"📦 _Compacting context ({compact_type})..._",
@@ -644,6 +650,12 @@ def create_http_app(daemon) -> web.Application:
         pane_id = payload.get("tmux_pane_id", "")
         if pane_id and pane_id != session.tmux_pane_id:
             session.tmux_pane_id = pane_id
+
+        # Full mute: hand approval back to CC's native TUI dialog by
+        # returning an empty body. The hook script's "unknown decision"
+        # branch falls through so CC shows its own prompt.
+        if daemon.is_fully_muted(session.session_id):
+            return web.Response(text="")
 
         # Thread status: waiting for approval
         await daemon._slack.set_thread_status(

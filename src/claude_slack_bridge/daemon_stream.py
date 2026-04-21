@@ -136,7 +136,7 @@ class StreamMixin:
         session = self._session_mgr.get(session_id)
         if not session or not self._slack:
             return
-        if session.session_id in self._tui_sync_muted:
+        if self.is_silenced(session.session_id):
             return
         # Skip PROCESS mode (stream events handle it) and finalized turns
         if session.mode == SessionMode.PROCESS.value:

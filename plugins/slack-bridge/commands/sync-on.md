@@ -39,7 +39,7 @@ echo "$RESULT" | grep -q '"ok"' && echo "✅ Session $SESSION_ID bound to Slack"
 
 # Step 3: Unmute in case it was muted
 curl -s -X POST "http://127.0.0.1:7778/sessions/$SESSION_ID/mute" \
-  -H "Content-Type: application/json" -d '{"muted": false}' > /dev/null 2>&1
+  -H "Content-Type: application/json" -d '{"level": "none"}' > /dev/null 2>&1
 echo "🔊 TUI↔Slack sync active"
 ```
 
