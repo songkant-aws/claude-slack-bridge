@@ -299,81 +299,93 @@ def test_forwarded_prompts_under_cap_not_cleared(config: BridgeConfig) -> None:
     assert len(daemon._forwarded_prompts) == 10
 
 
-# ── mute_session / unmute_session persistence + level semantics ──
+# ── Mute level persistence + semantics ──
 
 
-def test_mute_unmute_roundtrip_persists_to_disk(config: BridgeConfig) -> None:
-    """Mute levels survive daemon restart via muted.json dict format."""
+def test_mute_levels_roundtrip_persists_to_disk(config: BridgeConfig) -> None:
+    """set_mute_level/clear_mute_level survive daemon restart via muted.json."""
     daemon = Daemon(config)
     muted_path = config.config_dir / "muted.json"
 
-    daemon.mute_session("s1")             # default "full"
-    daemon.mute_session("s2", "ring")
-    assert daemon._mute_levels == {"s1": "full", "s2": "ring"}
-    assert json.loads(muted_path.read_text()) == {"s1": "full", "s2": "ring"}
+    daemon.set_mute_level("s1", "sync")
+    daemon.set_mute_level("s2", "ring")
+    assert daemon._mute_levels == {"s1": "sync", "s2": "ring"}
+    assert json.loads(muted_path.read_text()) == {"s1": "sync", "s2": "ring"}
 
     # Rehydrate — new Daemon instance reads muted.json via _load_muted().
     # Guards against NameError/import regressions in the persistence path.
     reborn = Daemon(config)
-    assert reborn._mute_levels == {"s1": "full", "s2": "ring"}
+    assert reborn._mute_levels == {"s1": "sync", "s2": "ring"}
 
-    reborn.unmute_session("s1")
+    reborn.clear_mute_level("s1")
     assert reborn._mute_levels == {"s2": "ring"}
     assert json.loads(muted_path.read_text()) == {"s2": "ring"}
 
 
-def test_mute_level_predicates(config: BridgeConfig) -> None:
-    """is_silenced covers both levels; is_fully_muted only covers full."""
+def test_default_mute_semantics(config: BridgeConfig) -> None:
+    """Unknown sessions are fully muted by default — new CC sessions stay quiet."""
     daemon = Daemon(config)
-    daemon.mute_session("full-sid", "full")
-    daemon.mute_session("ring-sid", "ring")
+    assert daemon.is_silenced("never-seen") is True
+    assert daemon.is_fully_muted("never-seen") is True
 
-    assert daemon.is_silenced("full-sid") and daemon.is_fully_muted("full-sid")
-    # ring silences ambient sync but must NOT fully-mute — permission requests
-    # still need to reach Slack.
-    assert daemon.is_silenced("ring-sid") and not daemon.is_fully_muted("ring-sid")
-    assert not daemon.is_silenced("other") and not daemon.is_fully_muted("other")
+
+def test_mute_level_predicates(config: BridgeConfig) -> None:
+    """sync opts in fully; ring silences chatter but keeps permission ringing."""
+    daemon = Daemon(config)
+    daemon.set_mute_level("synced", "sync")
+    daemon.set_mute_level("ringing", "ring")
+
+    # sync = not silenced, not fully-muted → full TUI→Slack sync.
+    assert not daemon.is_silenced("synced") and not daemon.is_fully_muted("synced")
+    # ring = silenced (ambient gone), but NOT fully muted (permission rings).
+    assert daemon.is_silenced("ringing") and not daemon.is_fully_muted("ringing")
 
 
 def test_mute_invalid_level_rejected(config: BridgeConfig) -> None:
     daemon = Daemon(config)
     with pytest.raises(ValueError):
-        daemon.mute_session("s1", "bogus")
+        daemon.set_mute_level("s1", "bogus")
+    # "full" is no longer a level — default state replaces it.
+    with pytest.raises(ValueError):
+        daemon.set_mute_level("s1", "full")
 
 
 async def test_mute_api_level_shape(config: BridgeConfig) -> None:
-    """POST /sessions/{id}/mute accepts only {level: full|ring|none}."""
+    """POST /sessions/{id}/mute accepts {level: sync|ring|none}."""
     daemon = Daemon(config)
     app = create_http_app(daemon)
     from aiohttp.test_utils import TestServer, TestClient
 
     async with TestClient(TestServer(app)) as client:
-        # full
-        resp = await client.post("/sessions/s1/mute", json={"level": "full"})
+        resp = await client.post("/sessions/s1/mute", json={"level": "sync"})
         assert resp.status == 200
-        assert (await resp.json())["level"] == "full"
-        assert daemon._mute_levels == {"s1": "full"}
+        assert (await resp.json())["level"] == "sync"
+        assert daemon._mute_levels == {"s1": "sync"}
 
-        # ring overrides full on same session
+        # ring overrides sync on same session
         resp = await client.post("/sessions/s1/mute", json={"level": "ring"})
         assert (await resp.json())["level"] == "ring"
         assert daemon._mute_levels == {"s1": "ring"}
 
-        # none unmutes
+        # none drops back to default full mute (clears the dict entry)
         resp = await client.post("/sessions/s1/mute", json={"level": "none"})
         body = await resp.json()
         assert body["ok"] is True and body["level"] is None
         assert daemon._mute_levels == {}
 
-        # missing/invalid level → 400
+        # Invalid payloads → 400
         resp = await client.post("/sessions/s1/mute", json={})
         assert resp.status == 400
         resp = await client.post("/sessions/s1/mute", json={"level": "bogus"})
         assert resp.status == 400
+        # "full" is no longer a valid API level either
+        resp = await client.post("/sessions/s1/mute", json={"level": "full"})
+        assert resp.status == 400
 
 
-async def test_permission_request_full_mute_falls_through(config: BridgeConfig) -> None:
-    """full mute returns empty body so the hook falls through to TUI's dialog."""
+async def test_permission_request_default_mute_falls_through(config: BridgeConfig) -> None:
+    """Sessions with no explicit level default to full mute — permission-request
+    returns empty body so CC's TUI dialog takes over."""
     daemon = Daemon(config)
     daemon._slack = MagicMock()
     daemon._slack.set_thread_status = AsyncMock()
@@ -382,7 +394,7 @@ async def test_permission_request_full_mute_falls_through(config: BridgeConfig) 
         session_id="s1", session_name="t", channel_id="C1", thread_ts="1.0",
         mode=SessionMode.HOOK,
     )
-    daemon.mute_session("s1", "full")
+    # No set_mute_level call — default state applies.
 
     app = create_http_app(daemon)
     from aiohttp.test_utils import TestServer, TestClient
@@ -394,7 +406,6 @@ async def test_permission_request_full_mute_falls_through(config: BridgeConfig) 
         })
         assert resp.status == 200
         assert (await resp.text()) == ""
-        # No Slack approval posted — TUI takes over.
         daemon._slack.post_blocks.assert_not_awaited()
 
 
@@ -408,7 +419,7 @@ async def test_permission_request_ring_mute_still_posts_to_slack(config: BridgeC
         session_id="s1", session_name="t", channel_id="C1", thread_ts="1.0",
         mode=SessionMode.HOOK,
     )
-    daemon.mute_session("s1", "ring")
+    daemon.set_mute_level("s1", "ring")
 
     # Stub out the approval wait so we don't block the test.
     original_create = daemon._approval_mgr.create

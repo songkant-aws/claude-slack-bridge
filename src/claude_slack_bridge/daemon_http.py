@@ -263,17 +263,24 @@ def create_http_app(daemon) -> web.Application:
 
     @routes.post("/sessions/{session_id}/mute")
     async def mute_session(req: web.Request) -> web.Response:
+        """Set the session's mute level.
+
+        Payload: {"level": "sync" | "ring" | "none"}
+          sync — explicit opt-in to TUI→Slack sync (from /sync-on)
+          ring — silence ambient chatter but keep Slack approvals (/sync-ring)
+          none — drop back to default full mute (/sync-off, or unset state)
+        """
         sid = req.match_info["session_id"]
         payload = await req.json()
         level = payload.get("level")
         if level == "none":
-            daemon.unmute_session(sid)
+            daemon.clear_mute_level(sid)
             return web.json_response({"ok": True, "level": None})
-        if level in ("full", "ring"):
-            daemon.mute_session(sid, level)
+        if level in ("sync", "ring"):
+            daemon.set_mute_level(sid, level)
             return web.json_response({"ok": True, "level": level})
         return web.json_response(
-            {"ok": False, "error": "level must be one of: full, ring, none"},
+            {"ok": False, "error": "level must be one of: sync, ring, none"},
             status=400,
         )
 

@@ -1,6 +1,6 @@
 {
   "name": "slack-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Bridge Claude Code sessions to Slack — chat with Claude from your phone via Slack threads",
   "author": {
     "name": "qianheng"

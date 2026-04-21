@@ -37,9 +37,9 @@ RESULT=$(curl -s -X POST http://127.0.0.1:7778/sessions/bind \
   -d "{\"session_id\": \"$SESSION_ID\", \"name\": \"TUI-${SESSION_ID:0:12}\", \"cwd\": \"$PWD\", \"tmux_pane_id\": \"${TMUX_PANE:-}\"}")
 echo "$RESULT" | grep -q '"ok"' && echo "✅ Session $SESSION_ID bound to Slack" || echo "⚠️ Bind: $RESULT"
 
-# Step 3: Unmute in case it was muted
+# Step 3: Mark session as explicitly opted-in to sync
 curl -s -X POST "http://127.0.0.1:7778/sessions/$SESSION_ID/mute" \
-  -H "Content-Type: application/json" -d '{"level": "none"}' > /dev/null 2>&1
+  -H "Content-Type: application/json" -d '{"level": "sync"}' > /dev/null 2>&1
 echo "🔊 TUI↔Slack sync active"
 ```
 

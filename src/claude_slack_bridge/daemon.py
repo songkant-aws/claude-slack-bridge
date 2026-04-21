@@ -51,12 +51,15 @@ class Daemon(StreamMixin, EventsMixin):
         self._seen = SeenCache()
         # Queued messages: session_id -> [text, ...]
         self._queued: dict[str, list[str]] = {}
-        # Per-session mute level. Persisted so /sync-off survives daemon restart.
-        #   "full" — nothing sent to Slack; permission requests fall through
-        #            to TUI's native approval dialog.
-        #   "ring" — sync chatter (prompts/progress/session lifecycle) silenced,
-        #            but permission requests still ring the Slack thread.
-        # Sessions not in the dict are unmuted.
+        # Per-session mute level. Persisted so mute choices survive daemon restart.
+        #   "sync" — user opted in: full TUI→Slack sync, permission requests
+        #            post Slack buttons. (Set by /sync-on.)
+        #   "ring" — ambient sync chatter silenced but permission requests
+        #            still ring Slack. (Set by /sync-ring.)
+        #   (absent) — default: full mute. Hook-side chatter and permission
+        #            requests stay in the TUI. (Restored by /sync-off.)
+        # PROCESS-mode stream events (Slack-originated sessions) bypass this
+        # entirely — they always reach Slack regardless of mute level.
         self._muted_path = config.config_dir / "muted.json"
         self._mute_levels: dict[str, str] = self._load_muted()
         # Prompts forwarded from Slack→tmux — skip echo back via UserPromptSubmit hook
@@ -78,7 +81,7 @@ class Daemon(StreamMixin, EventsMixin):
 
     # ── Muted-state persistence ──
 
-    _VALID_LEVELS = {"full", "ring"}
+    _VALID_LEVELS = {"sync", "ring"}
 
     def _load_muted(self) -> dict[str, str]:
         try:
@@ -102,23 +105,27 @@ class Daemon(StreamMixin, EventsMixin):
         except OSError:
             logger.debug("Failed to persist muted dict", exc_info=True)
 
-    def mute_session(self, session_id: str, level: str = "full") -> None:
+    def set_mute_level(self, session_id: str, level: str) -> None:
+        """Record an explicit level ("sync" or "ring"). Removing a session
+        from the dict (via clear_mute_level) drops it back to default full mute.
+        """
         if level not in self._VALID_LEVELS:
             raise ValueError(f"invalid mute level: {level!r}")
         self._mute_levels[session_id] = level
         self._save_muted()
 
-    def unmute_session(self, session_id: str) -> None:
+    def clear_mute_level(self, session_id: str) -> None:
+        """Remove any explicit level → session falls back to default full mute."""
         self._mute_levels.pop(session_id, None)
         self._save_muted()
 
     def is_silenced(self, session_id: str) -> bool:
-        """True when any mute is active — used to gate ambient sync chatter."""
-        return session_id in self._mute_levels
+        """Gate ambient sync chatter. True unless session opted in via /sync-on."""
+        return self._mute_levels.get(session_id) != "sync"
 
     def is_fully_muted(self, session_id: str) -> bool:
-        """True only for `full` mute — used to gate permission-request handoff."""
-        return self._mute_levels.get(session_id) == "full"
+        """Gate permission-request handoff. True unless session is in sync or ring."""
+        return self._mute_levels.get(session_id) not in ("sync", "ring")
 
     # ── Session cleanup ──
 
