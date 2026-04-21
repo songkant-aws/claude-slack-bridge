@@ -304,8 +304,9 @@ class Daemon(StreamMixin, EventsMixin):
             session.cwd = cwd
             session.origin = "tui"
             session.tmux_pane_id = tmux_pane_id
-            self.mute_session(session_key)
-            logger.info("Auto-bound TUI session %s to DM %s (muted by default)", session_key, dm_channel)
+            # Default: no explicit level → full mute. Don't touch _mute_levels
+            # here; absent key is the default state. Kept for historical clarity.
+            logger.info("Auto-bound TUI session %s to DM %s (default mute)", session_key, dm_channel)
             return session
         except Exception:
             logger.error("Failed to auto-bind session %s", session_key, exc_info=True)

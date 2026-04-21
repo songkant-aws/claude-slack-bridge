@@ -444,6 +444,40 @@ async def test_permission_request_ring_mute_still_posts_to_slack(config: BridgeC
         daemon._slack.post_blocks.assert_awaited()
 
 
+async def test_session_start_default_mute_no_slack_chatter(config: BridgeConfig) -> None:
+    """New TUI sessions default to full mute: SessionStart must not post to Slack.
+
+    Regression for two earlier bugs:
+    1. _auto_bind_session called the removed method `self.mute_session`, raising
+       AttributeError on every new session.
+    2. Even after that, session-start still called post_blocks/post_text for every
+       new CC session — cluttering the DM with empty threads.
+    """
+    daemon = Daemon(config)
+    # Mock the conversations_list → DM lookup path used by _auto_bind_session.
+    fake_web = MagicMock()
+    fake_web.conversations_list = AsyncMock(return_value={"channels": [{"id": "D1"}]})
+    daemon._slack = MagicMock()
+    daemon._slack.web = fake_web
+    daemon._slack.post_blocks = AsyncMock(return_value="ts.auto")
+    daemon._slack.post_text = AsyncMock()
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/hooks/session-start", json={
+            "session_key": "brand-new-sid",
+            "cwd": "/tmp/project",
+            "tmux_pane_id": "%0",
+        })
+        # Endpoint succeeded (no AttributeError, no 500).
+        assert resp.status == 200
+
+    # post_text is the "▶️ Session started" line and must stay silent under default mute.
+    daemon._slack.post_text.assert_not_awaited()
+
+
 # ── Version mismatch warning ──
 
 

@@ -199,12 +199,16 @@ class EventsMixin:
             await self._slack.post_text(channel_id, "\U0001f512 YOLO disabled for this session", thread_ts)
             return
         if lower == "sync off":
-            self.mute_session(session.session_id)
-            await self._slack.post_text(channel_id, "\U0001f507 TUI sync muted for this session", thread_ts)
+            self.clear_mute_level(session.session_id)
+            await self._slack.post_text(channel_id, "\U0001f507 TUI sync fully muted for this session", thread_ts)
             return
         if lower == "sync on":
-            self.unmute_session(session.session_id)
+            self.set_mute_level(session.session_id, "sync")
             await self._slack.post_text(channel_id, "\U0001f50a TUI sync resumed for this session", thread_ts)
+            return
+        if lower == "sync ring":
+            self.set_mute_level(session.session_id, "ring")
+            await self._slack.post_text(channel_id, "\U0001f515 TUI chatter muted — Slack approvals still active", thread_ts)
             return
 
         # Check for pending approval — remind user instead of forwarding
