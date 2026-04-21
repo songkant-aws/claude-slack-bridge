@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 import uuid
 
@@ -22,7 +21,6 @@ from claude_slack_bridge.slack_formatter import (
     SLACK_MSG_LIMIT,
     build_approval_blocks,
     build_approval_resolved_blocks,
-    build_session_header_blocks,
     build_tool_notification_blocks,
     build_user_prompt_blocks,
 )
@@ -202,62 +200,32 @@ def create_http_app(daemon) -> web.Application:
 
     @routes.post("/sessions/bind")
     async def bind_session(req: web.Request) -> web.Response:
-        """Bind a TUI session to a new Slack DM thread."""
+        """Bind a TUI session to a Slack DM thread (called by /sync-on)."""
         payload = await req.json()
         session_id = payload.get("session_id", "")
-        session_name = payload.get("name", session_id[:12])
+        session_name = payload.get("name", f"TUI-{session_id[:12]}")
         cwd = payload.get("cwd", daemon._config.work_dir)
         tmux_pane_id = payload.get("tmux_pane_id", "")
 
         if not daemon._slack or not daemon._bot_user_id:
             return web.json_response({"error": "slack not connected"}, status=503)
 
-        # Find or open DM with bot owner
-        owner_id = payload.get("owner_id", "")
-        if not owner_id:
-            # Use first DM channel we know about
-            resp = await daemon._slack.web.conversations_list(types="im", limit=1)
-            ims = resp.get("channels", [])
-            if ims:
-                dm_channel = ims[0]["id"]
-            else:
-                return web.json_response({"error": "no DM channel found"}, status=404)
-        else:
-            resp = await daemon._slack.web.conversations_open(users=owner_id)
-            dm_channel = resp["channel"]["id"]
-
-        # Reuse existing thread if session already bound
         session = daemon._session_mgr.get(session_id)
-        if session and session.thread_ts and session.channel_id == dm_channel:
-            thread_ts = session.thread_ts
-        else:
-            # New session — post header as thread root
-            blocks = build_session_header_blocks(session_id=session_id, directory=cwd)
-            basename = os.path.basename(cwd.rstrip("/")) if cwd else ""
-            fallback = f"{basename} @ {session_id[:12]}" if basename else f"Session {session_id[:12]}"
-            thread_ts = await daemon._slack.post_blocks(dm_channel, blocks, fallback)
-            if not session:
-                session = daemon._session_mgr.create(
-                    session_id=session_id,
-                    session_name=session_name,
-                    channel_id=dm_channel,
-                    thread_ts=thread_ts,
-                    mode=SessionMode.IDLE,
-                )
-            else:
-                session.channel_id = dm_channel
-                session.thread_ts = thread_ts
-                daemon._session_mgr._thread_index[(dm_channel, thread_ts)] = session.session_id
-                daemon._session_mgr._save()
+        if not session:
+            session = daemon._register_session(session_id, cwd, tmux_pane_id=tmux_pane_id)
+        session.session_name = session_name
         session.cwd = cwd
         session.origin = "tui"
         if tmux_pane_id:
             session.tmux_pane_id = tmux_pane_id
 
+        if not await daemon._ensure_slack_thread(session):
+            return web.json_response({"error": "no DM channel found"}, status=404)
+
         return web.json_response({
             "ok": True,
-            "channel_id": dm_channel,
-            "thread_ts": thread_ts,
+            "channel_id": session.channel_id,
+            "thread_ts": session.thread_ts,
             "session_id": session_id,
         })
 
@@ -278,6 +246,13 @@ def create_http_app(daemon) -> web.Application:
             return web.json_response({"ok": True, "level": None})
         if level in ("sync", "ring"):
             daemon.set_mute_level(sid, level)
+            # Ring needs a Slack thread eventually (for approvals). Creating
+            # it here — rather than on the first permission-request — means
+            # the user sees the thread appear right when they opt in.
+            if level == "ring":
+                session = daemon._session_mgr.get(sid)
+                if session:
+                    await daemon._ensure_slack_thread(session)
             return web.json_response({"ok": True, "level": level})
         return web.json_response(
             {"ok": False, "error": "level must be one of: sync, ring, none"},
@@ -307,26 +282,15 @@ def create_http_app(daemon) -> web.Application:
             if tool_name in daemon._config.auto_approve_tools:
                 return web.Response(text="approved")
 
-            # Need Slack connection to post approval buttons
-            if not daemon._slack:
+            # Unbound TUI sessions or missing Slack: auto-approve. Lazy bind
+            # happens from /hooks/permission-request or /sessions/bind, not here.
+            if not daemon._slack or not session:
                 return web.Response(text="approved")
-
-            # Auto-bind session to a Slack DM if not yet registered
-            if not session:
-                session = await daemon._auto_bind_session(
-                    session_key, payload.get("cwd", ""),
-                    tmux_pane_id=payload.get("tmux_pane_id", ""),
-                )
-                if not session:
-                    # Cannot reach Slack — fail open so TUI isn't blocked
-                    return web.Response(text="approved")
 
             # Only PROCESS mode (daemon's own --print) needs Slack approval.
             # All other modes (HOOK, IDLE) are TUI sessions — TUI has its
             # own approval UI; blocking here causes double-approval.
             if session.mode != SessionMode.PROCESS.value:
-                # Auto-approve for TUI sessions. JSONL watcher (started on
-                # UserPromptSubmit) handles intermediate text display.
                 return web.Response(text="approved")
 
             # PROCESS mode: post approval buttons to the Slack thread
@@ -514,15 +478,18 @@ def create_http_app(daemon) -> web.Application:
 
         session = daemon._session_mgr.get(session_key)
         if not session:
-            session = await daemon._auto_bind_session(session_key, cwd, tmux_pane_id=pane_id)
-        if session:
-            session.touch()
-            session.tui_active = time.time()
-            session.cwd = cwd or session.cwd
-            if pane_id:
-                session.tmux_pane_id = pane_id
-            daemon._session_mgr.set_mode(session_key, SessionMode.HOOK)
-            if daemon._slack and session.channel_id and not daemon.is_silenced(session.session_id):
+            session = daemon._register_session(session_key, cwd, tmux_pane_id=pane_id)
+        session.touch()
+        session.tui_active = time.time()
+        session.cwd = cwd or session.cwd
+        if pane_id:
+            session.tmux_pane_id = pane_id
+        daemon._session_mgr.set_mode(session_key, SessionMode.HOOK)
+
+        # Only chatter into Slack when the user has opted in (sync mode).
+        # Default mute keeps new TUI sessions out of the DM entirely.
+        if daemon._slack and not daemon.is_silenced(session.session_id):
+            if await daemon._ensure_slack_thread(session):
                 await daemon._slack.post_text(
                     session.channel_id,
                     "▶️ _Session started_",
@@ -643,14 +610,12 @@ def create_http_app(daemon) -> web.Application:
         if not daemon._slack:
             return web.Response(text="approved")
 
-        # Auto-bind if needed
+        # Register session (no Slack thread yet) so we can check mute level.
         if not session:
-            session = await daemon._auto_bind_session(
+            session = daemon._register_session(
                 session_key, cwd,
                 tmux_pane_id=payload.get("tmux_pane_id", ""),
             )
-            if not session:
-                return web.Response(text="approved")
 
         session.touch()
         session.tui_active = time.time()
@@ -660,9 +625,15 @@ def create_http_app(daemon) -> web.Application:
 
         # Full mute: hand approval back to CC's native TUI dialog by
         # returning an empty body. The hook script's "unknown decision"
-        # branch falls through so CC shows its own prompt.
+        # branch falls through so CC shows its own prompt. No Slack
+        # thread gets created in this path.
         if daemon.is_fully_muted(session.session_id):
             return web.Response(text="")
+
+        # Ring/sync mute: lazy-create the DM thread now so approval
+        # buttons have somewhere to land.
+        if not await daemon._ensure_slack_thread(session):
+            return web.Response(text="approved")
 
         # Thread status: waiting for approval
         await daemon._slack.set_thread_status(

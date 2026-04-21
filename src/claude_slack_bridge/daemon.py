@@ -268,49 +268,67 @@ class Daemon(StreamMixin, EventsMixin):
             return session
         return None
 
-    async def _auto_bind_session(self, session_key: str, cwd: str, tmux_pane_id: str = "") -> Session | None:
-        """Auto-bind a TUI session to a Slack DM thread for the approval flow.
+    def _register_session(
+        self, session_key: str, cwd: str, tmux_pane_id: str = ""
+    ) -> Session:
+        """Create a Session entry with no Slack binding yet.
 
-        When a PreToolUse hook arrives from a TUI session that has no Slack
-        binding yet, this creates a DM thread so approval buttons can be
-        posted there (Issue #2).
+        Every TUI-side hook that can arrive for an unknown session calls this
+        so we can track origin/tmux/mode even before any Slack thread exists.
+        Pair with `_ensure_slack_thread` to open the DM on demand.
         """
+        session = self._session_mgr.create(
+            session_id=session_key,
+            session_name=f"TUI-{session_key[:12]}",
+            channel_id="",
+            thread_ts="",
+            mode=SessionMode.HOOK,
+        )
+        session.cwd = cwd
+        session.origin = "tui"
+        session.tmux_pane_id = tmux_pane_id
+        return session
+
+    async def _ensure_slack_thread(self, session: Session) -> bool:
+        """Open a DM thread for this session if one doesn't exist yet.
+
+        Idempotent. Returns True once the session has a channel_id/thread_ts,
+        False if Slack is unavailable or the user has no DM channel open
+        with the bot.
+        """
+        if session.channel_id and session.thread_ts:
+            return True
         if not self._slack:
-            return None
+            return False
         try:
             resp = await self._slack.web.conversations_list(types="im", limit=1)
             ims = resp.get("channels", [])
             if not ims:
-                logger.warning("No DM channel found for auto-bind")
-                return None
+                logger.warning("No DM channel found for lazy bind")
+                return False
             dm_channel = ims[0]["id"]
 
-            name = f"TUI-{session_key[:12]}"
-            directory = cwd or self._config.work_dir
+            directory = session.cwd or self._config.work_dir
             blocks = build_session_header_blocks(
-                session_id=session_key, directory=directory
+                session_id=session.session_id, directory=directory
             )
             basename = os.path.basename(directory.rstrip("/")) if directory else ""
-            fallback = f"{basename} @ {session_key[:12]}" if basename else f"Session {session_key[:12]}"
+            fallback = (
+                f"{basename} @ {session.session_id[:12]}"
+                if basename else f"Session {session.session_id[:12]}"
+            )
             thread_ts = await self._slack.post_blocks(dm_channel, blocks, fallback)
 
-            session = self._session_mgr.create(
-                session_id=session_key,
-                session_name=name,
-                channel_id=dm_channel,
-                thread_ts=thread_ts,
-                mode=SessionMode.HOOK,
-            )
-            session.cwd = cwd
-            session.origin = "tui"
-            session.tmux_pane_id = tmux_pane_id
-            # Default: no explicit level → full mute. Don't touch _mute_levels
-            # here; absent key is the default state. Kept for historical clarity.
-            logger.info("Auto-bound TUI session %s to DM %s (default mute)", session_key, dm_channel)
-            return session
+            session.channel_id = dm_channel
+            session.thread_ts = thread_ts
+            # Keep the manager's reverse index in sync.
+            self._session_mgr._thread_index[(dm_channel, thread_ts)] = session.session_id
+            self._session_mgr._save()
+            logger.info("Lazy-bound session %s → DM %s", session.session_id, dm_channel)
+            return True
         except Exception:
-            logger.error("Failed to auto-bind session %s", session_key, exc_info=True)
-            return None
+            logger.error("Failed to lazy-bind session %s", session.session_id, exc_info=True)
+            return False
 
     def _is_tui_active(self, session: Session) -> bool:
         """Check if TUI was recently active (hook received within 30s)."""

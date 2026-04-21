@@ -444,23 +444,27 @@ async def test_permission_request_ring_mute_still_posts_to_slack(config: BridgeC
         daemon._slack.post_blocks.assert_awaited()
 
 
-async def test_session_start_default_mute_no_slack_chatter(config: BridgeConfig) -> None:
-    """New TUI sessions default to full mute: SessionStart must not post to Slack.
-
-    Regression for two earlier bugs:
-    1. _auto_bind_session called the removed method `self.mute_session`, raising
-       AttributeError on every new session.
-    2. Even after that, session-start still called post_blocks/post_text for every
-       new CC session — cluttering the DM with empty threads.
-    """
-    daemon = Daemon(config)
-    # Mock the conversations_list → DM lookup path used by _auto_bind_session.
+def _mock_slack_for_lazy_bind(daemon) -> None:
+    """Rig up a SlackClient double that supports _ensure_slack_thread + posts."""
     fake_web = MagicMock()
     fake_web.conversations_list = AsyncMock(return_value={"channels": [{"id": "D1"}]})
     daemon._slack = MagicMock()
     daemon._slack.web = fake_web
     daemon._slack.post_blocks = AsyncMock(return_value="ts.auto")
     daemon._slack.post_text = AsyncMock()
+    daemon._slack.set_thread_status = AsyncMock()
+    daemon._bot_user_id = "U_BOT"
+
+
+async def test_session_start_default_mute_creates_no_slack_thread(config: BridgeConfig) -> None:
+    """New TUI sessions default to full mute: no DM thread, no post at all.
+
+    Regression for: (a) _auto_bind_session AttributeError on every new session;
+    (b) auto-bind posting a thread header into the DM for every fresh CC session,
+    cluttering the user's Slack inbox with empty threads.
+    """
+    daemon = Daemon(config)
+    _mock_slack_for_lazy_bind(daemon)
 
     app = create_http_app(daemon)
     from aiohttp.test_utils import TestServer, TestClient
@@ -471,11 +475,91 @@ async def test_session_start_default_mute_no_slack_chatter(config: BridgeConfig)
             "cwd": "/tmp/project",
             "tmux_pane_id": "%0",
         })
-        # Endpoint succeeded (no AttributeError, no 500).
         assert resp.status == 200
 
-    # post_text is the "▶️ Session started" line and must stay silent under default mute.
+    # Session row exists (so we can track origin/tmux/mode) but has no Slack binding.
+    session = daemon._session_mgr.get("brand-new-sid")
+    assert session is not None
+    assert session.channel_id == ""
+    assert session.thread_ts == ""
+    # Nothing posted to Slack.
+    daemon._slack.post_blocks.assert_not_awaited()
     daemon._slack.post_text.assert_not_awaited()
+
+
+async def test_sync_on_lazy_creates_thread(config: BridgeConfig) -> None:
+    """/sessions/bind (sync-on) is the trigger that creates the Slack thread."""
+    daemon = Daemon(config)
+    _mock_slack_for_lazy_bind(daemon)
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/sessions/bind", json={
+            "session_id": "sid-A", "name": "TUI-A", "cwd": "/tmp/project",
+        })
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["ok"] is True
+        assert body["channel_id"] == "D1"
+        assert body["thread_ts"] == "ts.auto"
+
+    # Thread header posted exactly once.
+    daemon._slack.post_blocks.assert_awaited_once()
+    session = daemon._session_mgr.get("sid-A")
+    assert session.channel_id == "D1" and session.thread_ts == "ts.auto"
+
+
+async def test_sync_on_idempotent(config: BridgeConfig) -> None:
+    """Calling /sessions/bind twice reuses the existing thread; no re-post."""
+    daemon = Daemon(config)
+    _mock_slack_for_lazy_bind(daemon)
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        await client.post("/sessions/bind", json={"session_id": "sid-B", "cwd": "/tmp"})
+        await client.post("/sessions/bind", json={"session_id": "sid-B", "cwd": "/tmp"})
+
+    # First call posts; second is a no-op on the Slack side.
+    assert daemon._slack.post_blocks.await_count == 1
+
+
+async def test_permission_request_ring_mute_lazy_binds_thread(config: BridgeConfig) -> None:
+    """First permission-request under ring mute creates the thread on demand."""
+    daemon = Daemon(config)
+    _mock_slack_for_lazy_bind(daemon)
+    # Pre-register session in ring mode (mimics /sync-ring having set the level
+    # but not yet bound, e.g. if ring was set before any Slack interaction).
+    session = daemon._register_session("sid-R", "/tmp/proj")
+    daemon.set_mute_level("sid-R", "ring")
+    assert session.channel_id == ""  # no thread yet
+
+    # Stub out the approval wait so we don't block.
+    original_create = daemon._approval_mgr.create
+    def _fake_create(request_id, **kwargs):
+        state = original_create(request_id, **kwargs)
+        state.resolve("approved")
+        return state
+    daemon._approval_mgr.create = _fake_create
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/hooks/permission-request", json={
+            "session_key": "sid-R", "tool_name": "Bash",
+            "tool_input": {"command": "rm"}, "cwd": "/tmp",
+        })
+        body = await resp.json()
+        assert body["decision"] == "approved"
+
+    # Thread was lazy-bound during the permission-request handling.
+    session = daemon._session_mgr.get("sid-R")
+    assert session.channel_id == "D1" and session.thread_ts == "ts.auto"
+    daemon._slack.post_blocks.assert_awaited()  # header + approval buttons
 
 
 # ── Version mismatch warning ──
