@@ -261,7 +261,7 @@ class EventsMixin:
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks, text="\u2705 Approved")
                 except Exception:
-                    logger.debug("Failed to update approve message", exc_info=True)
+                    logger.warning("Failed to update approve message", exc_info=True)
         elif action_id == "reject_tool":
             state = self._approval_mgr.get(value)
             self._approval_mgr.resolve(value, "rejected")
@@ -274,7 +274,7 @@ class EventsMixin:
                 try:
                     await self._slack.update_blocks(channel_id, msg_ts, blocks, text="\U0001f6ab Rejected")
                 except Exception:
-                    logger.debug("Failed to update reject message", exc_info=True)
+                    logger.warning("Failed to update reject message", exc_info=True)
         elif action_id.startswith(OPTIONS_ACTION_PREFIX):
             thread_ts = msg.get("thread_ts", msg_ts)
             if channel_id and thread_ts:
@@ -288,7 +288,7 @@ class EventsMixin:
                                 text="\u2705 Selected: *" + value + "*", blocks=[],
                             )
                         except Exception:
-                            logger.debug("Failed to update options message", exc_info=True)
+                            logger.warning("Failed to update options message", exc_info=True)
         elif action_id == "trust_tool":
             # "Trust" = tell CC to persist an allow rule (equivalent to
             # the TUI's "Yes, don't ask again"). The hook script will
@@ -314,7 +314,7 @@ class EventsMixin:
                         text=f"\U0001f91d Trusted `{rule_label}`",
                     )
                 except Exception:
-                    logger.debug("Failed to update trust message", exc_info=True)
+                    logger.warning("Failed to update trust message", exc_info=True)
         elif action_id == "yolo_session":
             # "YOLO" = auto-approve every subsequent tool in this
             # session until the daemon restarts. This is what the
@@ -331,7 +331,7 @@ class EventsMixin:
                         text="\U0001f3bd YOLO — auto-approving this session",
                     )
                 except Exception:
-                    logger.debug("Failed to update yolo message", exc_info=True)
+                    logger.warning("Failed to update yolo message", exc_info=True)
         elif action_id == "takeover_session":
             session = self._session_mgr.get(value)
             if session:
@@ -344,4 +344,4 @@ class EventsMixin:
                             text="\u26a1 Slack has taken over session"
                         )
                     except Exception:
-                        logger.debug("Failed to update takeover message", exc_info=True)
+                        logger.warning("Failed to update takeover message", exc_info=True)
