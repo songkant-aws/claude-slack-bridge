@@ -40,9 +40,12 @@ class StreamMixin:
     async def _update_progress(self, session: Session, line: str, is_tool: bool = False) -> None:
         """Update progress message with separate slots for text and tool status.
 
-        Progress message has two areas that don't overwrite each other:
-        - _text: intermediate assistant reasoning (from JSONL watcher)
-        - _tool: current tool status (from PostToolUse hook, replaces previous)
+        Progress message has two areas that render together:
+        - _text_blocks: all intermediate assistant reasoning so far this turn
+          (accumulated — each new block appends so users see the agent's
+          thinking grow, not just the latest sentence)
+        - _tool: current tool status (single-slot — replaced on each new tool
+          so the line doesn't stack into a wall)
         """
         sid = session.session_id
         now = time.time()
@@ -52,7 +55,7 @@ class StreamMixin:
             )
             self._progress[sid] = {
                 "msg_ts": msg_ts, "last_update": now, "lines": [],
-                "_text": "" if is_tool else line,
+                "_text_blocks": [] if is_tool else [line],
                 "_tool": line if is_tool else "",
             }
         else:
@@ -60,13 +63,13 @@ class StreamMixin:
             if is_tool:
                 state["_tool"] = line
             else:
-                state["_text"] = line
+                state["_text_blocks"].append(line)
             state["lines"].append(line)  # Keep for finalize context
 
-            # Build display: text + tool (both visible)
-            parts = []
-            if state["_text"]:
-                parts.append(state["_text"])
+            # Build display: all text blocks joined + current tool line.
+            parts: list[str] = []
+            if state["_text_blocks"]:
+                parts.append("\n\n".join(state["_text_blocks"]))
             if state["_tool"]:
                 parts.append(state["_tool"])
             if not parts:
@@ -81,6 +84,39 @@ class StreamMixin:
                     state["last_update"] = now
                 except Exception:
                     logger.debug("Failed to update progress message", exc_info=True)
+
+    async def _seal_progress(self, session: Session) -> None:
+        """Freeze the current progress message and forget the msg_ts.
+
+        Called right before we post an out-of-band message (e.g. approval
+        buttons) so the next tool/text event creates a *new* progress
+        message below the interruption, rather than being chat_update-ed
+        into the old one. Without this, Slack's timeline shows the
+        approval buttons wedged above the latest progress edit and users
+        think the stream has stalled.
+        """
+        sid = session.session_id
+        state = self._progress.pop(sid, None)
+        if not state or not state.get("msg_ts"):
+            return
+        # Redraw the current display one last time without the cursor, so
+        # the frozen snapshot looks final instead of mid-stream.
+        parts: list[str] = []
+        if state.get("_text_blocks"):
+            parts.append("\n\n".join(state["_text_blocks"]))
+        if state.get("_tool"):
+            parts.append(state["_tool"])
+        if not parts:
+            return
+        text = "\n".join(parts)
+        try:
+            await self._slack.web.chat_update(
+                channel=session.channel_id,
+                ts=state["msg_ts"],
+                text=text[:_SLACK_MAX_TEXT],
+            )
+        except Exception:
+            logger.debug("Failed to seal progress message", exc_info=True)
 
     async def _finalize_progress(self, session: Session, final_text: str) -> None:
         """Replace progress message with final result.
@@ -182,7 +218,10 @@ class StreamMixin:
 
         for msg in messages:
             if msg.role == "assistant" and msg.text:
-                await self._update_progress(session, "_" + msg.text[:200] + "_")
+                # Full text, italicized to mark it as streaming thought.
+                # _update_progress accumulates blocks so earlier reasoning
+                # stays visible instead of being overwritten by the latest.
+                await self._update_progress(session, "_" + msg.text + "_")
             elif msg.role == "tool_use":
                 detail = ""
                 if msg.tool_name == "Bash":

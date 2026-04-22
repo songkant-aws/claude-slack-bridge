@@ -320,7 +320,12 @@ def create_http_app(daemon) -> web.Application:
             if session.mode != SessionMode.PROCESS.value:
                 return web.Response(text="approved")
 
-            # PROCESS mode: post approval buttons to the Slack thread
+            # PROCESS mode: post approval buttons to the Slack thread.
+            # Seal the in-flight progress message first so the buttons
+            # land below the current stream; otherwise later chat_update
+            # calls on the progress msg re-order it visually above the
+            # approval and users think the stream has stalled.
+            await daemon._seal_progress(session)
             await daemon._slack.set_thread_status(
                 session.channel_id, session.thread_ts,
                 f"Waiting for approval \u2014 {tool_name}..."
@@ -659,6 +664,10 @@ def create_http_app(daemon) -> web.Application:
         # buttons have somewhere to land.
         if not await daemon._ensure_slack_thread(session):
             return web.Response(text="approved")
+
+        # Seal the in-flight progress message so approval buttons land
+        # below the current stream (see PROCESS-mode site above for why).
+        await daemon._seal_progress(session)
 
         # Thread status: waiting for approval
         await daemon._slack.set_thread_status(

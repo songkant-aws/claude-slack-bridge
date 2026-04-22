@@ -751,7 +751,7 @@ async def test_user_prompt_pops_progress_even_when_filtered(
     # Seed stale progress state from a prior (unfinalized) turn.
     daemon._progress["sid-pop"] = {
         "msg_ts": "ts.old", "last_update": 0, "lines": [],
-        "_text": "", "_tool": "",
+        "_text_blocks": [], "_tool": "",
     }
 
     app = create_http_app(daemon)
@@ -785,7 +785,7 @@ async def test_post_tool_use_without_preceding_user_prompt_edits_old_msg(
     # Pretend a previous turn left progress in place and was never popped/finalized.
     daemon._progress["sid-notouch"] = {
         "msg_ts": "ts.old", "last_update": 0, "lines": [],
-        "_text": "prior assistant text", "_tool": "",
+        "_text_blocks": ["prior assistant text"], "_tool": "",
     }
 
     app = create_http_app(daemon)
@@ -863,3 +863,152 @@ def test_strip_wrapper_handles_multiline_reminder():
         "implement the feature"
     )
     assert _strip_wrapper_blocks(prompt) == "implement the feature"
+
+
+# ── Progress accumulation (B1) and approval sealing ──
+
+
+async def test_update_progress_accumulates_assistant_text(config: BridgeConfig) -> None:
+    """Successive assistant text blocks should stack in the progress message
+    instead of overwriting each other. The old single-slot behavior made long
+    reasoning look like "one sentence, then suddenly the final answer."
+    """
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-acc")
+    # Drive updates past the 1s throttle between calls.
+    import time as _t
+
+    await daemon._update_progress(daemon._session_mgr.get("sid-acc"), "_first thought_")
+    state = daemon._progress["sid-acc"]
+    state["last_update"] = 0  # let the next update fire chat_update
+    await daemon._update_progress(daemon._session_mgr.get("sid-acc"), "_second thought_")
+
+    # Both blocks must survive in state.
+    assert daemon._progress["sid-acc"]["_text_blocks"] == [
+        "_first thought_", "_second thought_"
+    ]
+    # The chat_update payload should contain both.
+    chat_update = daemon._slack.web.chat_update
+    chat_update.assert_awaited()
+    last_text = chat_update.await_args.kwargs.get("text", "")
+    assert "_first thought_" in last_text and "_second thought_" in last_text
+
+
+async def test_update_progress_no_200_char_truncation(config: BridgeConfig) -> None:
+    """The watcher used to truncate assistant text to 200 chars — verify a
+    longer block survives end-to-end through _update_progress.
+    """
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-long")
+    long_block = "_" + ("word " * 80).strip() + "_"  # ~400 chars
+    assert len(long_block) > 200
+
+    await daemon._update_progress(daemon._session_mgr.get("sid-long"), long_block)
+    state = daemon._progress["sid-long"]
+    state["last_update"] = 0
+    await daemon._update_progress(daemon._session_mgr.get("sid-long"), "_next_")
+
+    text = daemon._slack.web.chat_update.await_args.kwargs.get("text", "")
+    assert long_block in text
+
+
+async def test_seal_progress_clears_state_and_drops_cursor(config: BridgeConfig) -> None:
+    """_seal_progress should: (a) remove the session's entry from _progress so
+    the next update creates a fresh Slack message, (b) chat_update the frozen
+    copy one last time without the streaming cursor.
+    """
+    from claude_slack_bridge.daemon_stream import _CURSOR
+
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-seal")
+    session = daemon._session_mgr.get("sid-seal")
+    daemon._progress["sid-seal"] = {
+        "msg_ts": "ts.live", "last_update": 0, "lines": [],
+        "_text_blocks": ["thinking..."], "_tool": "🪆 `Bash` ls",
+    }
+
+    await daemon._seal_progress(session)
+
+    # State popped — next _update_progress would start fresh.
+    assert "sid-seal" not in daemon._progress
+    # Frozen redraw landed and did NOT carry the cursor marker.
+    chat_update = daemon._slack.web.chat_update
+    chat_update.assert_awaited_once()
+    kwargs = chat_update.await_args.kwargs
+    assert kwargs["ts"] == "ts.live"
+    assert _CURSOR not in kwargs["text"]
+    assert "thinking..." in kwargs["text"]
+    assert "Bash" in kwargs["text"]
+
+
+async def test_seal_progress_is_noop_when_no_active_progress(config: BridgeConfig) -> None:
+    """Sealing when there's no in-flight progress must not crash and must not
+    spam Slack with an empty chat_update (e.g. approval as the very first
+    event of a turn)."""
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-noseal")
+    session = daemon._session_mgr.get("sid-noseal")
+
+    await daemon._seal_progress(session)  # should just return
+
+    daemon._slack.web.chat_update.assert_not_awaited()
+
+
+async def test_permission_request_seals_progress_before_posting_buttons(
+    config: BridgeConfig,
+) -> None:
+    """When a TUI permission-request arrives with a live progress message,
+    the approval buttons must come AFTER a sealed copy of the current progress.
+    Observable: _progress[sid] is cleared by the time post_blocks is called,
+    and the seal's chat_update fired before the buttons' post_blocks.
+    """
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-perm")
+
+    # Seed live progress state.
+    daemon._progress["sid-perm"] = {
+        "msg_ts": "ts.live", "last_update": 0, "lines": [],
+        "_text_blocks": ["I should probably run this"], "_tool": "",
+    }
+
+    # Track call ordering: chat_update (seal) must happen before post_blocks (buttons).
+    call_order: list[str] = []
+    orig_chat_update = daemon._slack.web.chat_update
+    async def tracked_chat_update(**kw):
+        call_order.append("seal")
+        return await orig_chat_update(**kw)
+    daemon._slack.web.chat_update = tracked_chat_update
+
+    orig_post_blocks = daemon._slack.post_blocks
+    async def tracked_post_blocks(*a, **kw):
+        call_order.append("buttons")
+        return await orig_post_blocks(*a, **kw)
+    daemon._slack.post_blocks = tracked_post_blocks
+
+    # Stub approval wait so it doesn't block.
+    original_create = daemon._approval_mgr.create
+    def _fake_create(request_id, **kwargs):
+        st = original_create(request_id, **kwargs)
+        st.resolve("approved")
+        return st
+    daemon._approval_mgr.create = _fake_create
+
+    app = create_http_app(daemon)
+    from aiohttp.test_utils import TestServer, TestClient
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/hooks/permission-request", json={
+            "session_key": "sid-perm",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm file"},
+            "cwd": "/tmp",
+        })
+        assert resp.status == 200
+
+    # Progress state was sealed → no longer tracked.
+    assert "sid-perm" not in daemon._progress
+    # Seal ran, then buttons were posted.
+    assert "seal" in call_order and "buttons" in call_order
+    assert call_order.index("seal") < call_order.index("buttons"), (
+        f"Approval buttons must land after the sealed progress; got {call_order}"
+    )
