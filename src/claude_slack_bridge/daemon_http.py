@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 
@@ -26,6 +27,32 @@ from claude_slack_bridge.slack_formatter import (
 )
 
 _SLACK_MAX_TEXT = SLACK_MSG_LIMIT
+
+# Wrapper tags Claude Code prepends to user prompts: system reminders (e.g.
+# plan-mode notices), slash-command metadata, and local-command output blocks.
+# Stripping these *leading* blocks recovers any real user text that follows,
+# so a plan-mode prompt like
+#     "<system-reminder>Plan mode is active...</system-reminder>\n\nfix the bug"
+# still syncs "fix the bug" to Slack instead of being dropped wholesale.
+_WRAPPER_TAG_RE = re.compile(
+    r"^\s*<(system-reminder|task-notification|command-name|command-message|"
+    r"command-args|local-command-[\w-]+)>.*?</\1>\s*",
+    re.DOTALL,
+)
+
+
+def _strip_wrapper_blocks(text: str) -> str:
+    """Peel off leading <system-reminder>/<command-*>/<local-command-*> blocks.
+
+    Returns the remainder stripped of surrounding whitespace. If the whole
+    payload is wrapper-only, returns an empty string and the caller should
+    treat it as a synthetic prompt (don't post to Slack).
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = _WRAPPER_TAG_RE.sub("", text, count=1)
+    return text.strip()
 
 
 async def _maybe_warn_version_mismatch(
@@ -373,20 +400,18 @@ def create_http_app(daemon) -> web.Application:
                 # Skip Slack→tmux echo (forwarded from Slack, would be duplicate)
                 if stripped in daemon._forwarded_prompts:
                     daemon._forwarded_prompts.discard(stripped)
-                # Skip system messages
-                elif stripped.startswith("<") and any(
-                    tag in stripped[:100]
-                    for tag in ("task-notification", "system-reminder",
-                                "local-command", "command-name", "command-message")
-                ):
-                    pass
-                # TUI-typed prompt — sync to Slack so team can see what was asked
-                elif stripped:
-                    await daemon._slack.post_text(
-                        session.channel_id,
-                        f"\U0001f4ac *User:* {stripped[:3000]}",
-                        session.thread_ts,
-                    )
+                else:
+                    # Peel off leading <system-reminder>/<command-*> blocks
+                    # that Claude Code prepends (e.g. plan-mode notices). Post
+                    # whatever real user text survives; if nothing survives,
+                    # it was a pure wrapper — skip it.
+                    user_text = _strip_wrapper_blocks(stripped)
+                    if user_text:
+                        await daemon._slack.post_text(
+                            session.channel_id,
+                            f"\U0001f4ac *User:* {user_text[:3000]}",
+                            session.thread_ts,
+                        )
             elif hook_type == "post-tool-use" and daemon._slack and session.channel_id:
                 tool_name = payload.get("tool_name", "")
                 tool_input = payload.get("tool_input", {})

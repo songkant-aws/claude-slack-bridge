@@ -15,6 +15,7 @@ from claude_slack_bridge.daemon import Daemon
 from claude_slack_bridge.daemon_http import (
     _maybe_warn_version_mismatch,
     _read_last_turn_from_jsonl,
+    _strip_wrapper_blocks,
     create_http_app,
 )
 from claude_slack_bridge.session_manager import SessionManager, SessionMode
@@ -674,21 +675,13 @@ def _setup_bound_sync_session(daemon, sid: str = "sid-plan") -> None:
     daemon._bot_user_id = "U_BOT"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "H1: daemon_http.py:377-382 filter drops plan-mode prompts whose "
-        "<system-reminder> wrapper merely prefixes the real user text. "
-        "Remove this xfail when the filter is narrowed to strip the wrapper."
-    ),
-)
 async def test_user_prompt_plan_mode_system_reminder_filter_drops_real_text(
     config: BridgeConfig,
 ) -> None:
-    """H1: plan-mode prepends <system-reminder> to every user prompt. The filter
-    at daemon_http.py:377-382 sees "<" + "system-reminder" and drops the whole
-    payload — even though real user text follows. Reproduces the "messages stop
-    syncing after entering /plan" report.
+    """H1 regression: plan-mode prepends <system-reminder> to every user prompt;
+    the user-prompt handler now strips that leading wrapper and still syncs the
+    real text. Before the fix, daemon_http.py's startswith("<") + tag-in-100-chars
+    heuristic dropped the whole payload.
     """
     daemon = Daemon(config)
     _setup_bound_sync_session(daemon, "sid-plan")
@@ -815,3 +808,58 @@ async def test_post_tool_use_without_preceding_user_prompt_edits_old_msg(
     assert kwargs.get("ts") == "ts.old", (
         "H2 confirmed: post-tool-use without user-prompt edits the stale msg_ts"
     )
+
+
+# ── _strip_wrapper_blocks unit tests ──
+
+
+def test_strip_wrapper_keeps_real_text_after_system_reminder():
+    """The plan-mode case: one leading <system-reminder> block + real user text."""
+    got = _strip_wrapper_blocks(
+        "<system-reminder>Plan mode is active.</system-reminder>\n\nfix the bug"
+    )
+    assert got == "fix the bug"
+
+
+def test_strip_wrapper_peels_multiple_leading_blocks():
+    """Slash-command invocations stack several wrapper blocks before real text."""
+    got = _strip_wrapper_blocks(
+        "<command-name>/plan</command-name>"
+        "<command-message>plan</command-message>"
+        "<command-args></command-args>\n\n"
+        "design the migration"
+    )
+    assert got == "design the migration"
+
+
+def test_strip_wrapper_returns_empty_for_wrapper_only():
+    """Pure wrapper payload → caller treats as skip (nothing to sync)."""
+    assert _strip_wrapper_blocks(
+        "<system-reminder>internal only</system-reminder>"
+    ) == ""
+
+
+def test_strip_wrapper_leaves_plain_text_untouched():
+    """No wrappers: stripper is a no-op (sans outer whitespace)."""
+    assert _strip_wrapper_blocks("  hello world  ") == "hello world"
+
+
+def test_strip_wrapper_does_not_strip_inline_lookalikes():
+    """<system-reminder> in the middle of a real prompt stays put — we only peel
+    leading wrappers, not anything that happens to contain angle brackets."""
+    got = _strip_wrapper_blocks(
+        "look at <system-reminder>this literal</system-reminder> in the code"
+    )
+    assert got == "look at <system-reminder>this literal</system-reminder> in the code"
+
+
+def test_strip_wrapper_handles_multiline_reminder():
+    """The real plan-mode payload has newlines and a big block of rules."""
+    prompt = (
+        "<system-reminder>\n"
+        "Plan mode is active. The user indicated that they do not want you to\n"
+        "execute yet -- you MUST NOT make any edits...\n"
+        "</system-reminder>\n\n"
+        "implement the feature"
+    )
+    assert _strip_wrapper_blocks(prompt) == "implement the feature"
