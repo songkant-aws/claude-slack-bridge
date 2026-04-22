@@ -173,4 +173,44 @@ def test_main_exits_one_on_failure(
     monkeypatch.setattr(resolver.sys, "argv", ["resolver", "/proj/a"])
 
     assert resolver.main() == 1
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    # Diagnostics go to stderr unconditionally on failure so users
+    # filing bugs have a trace to attach.
+    assert "[resolver]" in captured.err
+    assert "/proj/a" in captured.err
+
+
+def test_matches_cwd_via_realpath(
+    fake_home: Path,
+    tmp_path: Path,
+    resolver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Claude records cwd as /real/path; $PWD comes in as /symlink/path.
+    # The resolver should treat them as equal after realpath.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    _write_session(fake_home, 777, cwd=str(real), sessionId="via-link")
+    _patch_parent_chain(monkeypatch, resolver, [100, 777, 1])
+
+    assert resolver.resolve_session_id(str(link)) == "via-link"
+
+
+def test_trace_logs_each_candidate(
+    fake_home: Path, resolver: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_session(fake_home, 500, cwd="/proj/other", sessionId="wrong-cwd")
+    _write_session(fake_home, 700, kind="print", sessionId="wrong-kind")
+    _write_session(fake_home, 900, cwd="/proj/a", sessionId="right")
+    _patch_parent_chain(monkeypatch, resolver, [100, 500, 700, 900, 1])
+
+    trace: list[str] = []
+    assert resolver.resolve_session_id("/proj/a", trace=trace) == "right"
+    blob = "\n".join(trace)
+    assert "cwd mismatch" in blob  # pid=500 branch
+    assert "kind='print'" in blob or 'kind="print"' in blob  # pid=700 branch
+    assert "matched sessionId=right" in blob  # pid=900 branch

@@ -9,17 +9,11 @@ you're on your phone and want to approve tools from Slack without the thread
 filling up with sync chatter.
 
 ```bash
-SESSION_ID=$("${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-session-id" "$PWD" 2>/dev/null)
+SESSION_ID=$("${CLAUDE_PLUGIN_ROOT}/bin/claude-slack-bridge-session-id" "$PWD")
 if [ -z "$SESSION_ID" ]; then
-    CWD_ENCODED=$(echo "$PWD" | sed 's|^/||; s|/|-|g')
-    SESSION_DIR="$HOME/.claude/projects/-${CWD_ENCODED}"
-    [ ! -d "$SESSION_DIR" ] && SESSION_DIR=$(ls -dt $HOME/.claude/projects/-* 2>/dev/null | head -1)
-    SESSION_ID=$(basename "$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)" .jsonl 2>/dev/null)
-fi
-
-if [ -z "$SESSION_ID" ]; then
-    echo "⚠️ No session found"
-    exit 0
+    echo "❌ Could not resolve this TUI's session_id."
+    echo "   The resolver walks up from pid $$ looking for ~/.claude/sessions/<pid>.json."
+    exit 1
 fi
 
 RESULT=$(curl -s -X POST "http://127.0.0.1:7778/sessions/$SESSION_ID/mute" \
