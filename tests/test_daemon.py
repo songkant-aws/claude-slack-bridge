@@ -215,6 +215,40 @@ def test_read_last_turn_from_jsonl_empty_cwd() -> None:
     assert result == ""
 
 
+def test_read_last_turn_prefixes_blocks_with_bullet(tmp_path: Path) -> None:
+    """Each assistant block gets a leading ●, matching the streaming progress
+    message so Slack's finalized text keeps the same visual rhythm as the TUI.
+    """
+    session_id = "test-bullets-xyz"
+    cwd = str(tmp_path / "bullets")
+    project_dir = cwd.replace("/", "-").replace(".", "-")
+    jsonl_dir = Path.home() / ".claude" / "projects" / project_dir
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = jsonl_dir / f"{session_id}.jsonl"
+
+    lines = [
+        json.dumps({"type": "user", "message": {"content": "go"}, "timestamp": "t1"}),
+        json.dumps({"type": "assistant", "message": {"content": "first thought"}, "timestamp": "t2"}),
+        json.dumps({"type": "assistant", "message": {"content": "second thought"}, "timestamp": "t3"}),
+    ]
+    jsonl_path.write_text("\n".join(lines) + "\n")
+
+    try:
+        parser = ConversationParser()
+        result = _read_last_turn_from_jsonl(parser, session_id, cwd)
+        # Both blocks present, each with the bullet prefix.
+        assert result.startswith("● first thought")
+        assert "● second thought" in result
+        # Exactly two bullets (one per assistant block), not one global prefix.
+        assert result.count("● ") == 2
+    finally:
+        jsonl_path.unlink(missing_ok=True)
+        try:
+            jsonl_dir.rmdir()
+        except OSError:
+            pass
+
+
 # ── Session lookup by cwd fallback tests ──
 
 
@@ -771,18 +805,24 @@ async def test_user_prompt_pops_progress_even_when_filtered(
     )
 
 
-async def test_post_tool_use_without_preceding_user_prompt_edits_old_msg(
+async def test_post_tool_use_does_not_touch_progress_message(
     config: BridgeConfig,
 ) -> None:
-    """H2 reproducer: if a plan-mode turn boundary doesn't fire UserPromptSubmit
-    at all (e.g. an auto-accepted plan continuing into tools), post-tool-use
-    lands on the OLD progress msg_ts and chat_update-s it. This matches the
-    reporter's "new content edits the previous message" symptom.
+    """Invariant: the post-tool-use hook must NOT write the progress message.
+    Tool display is driven exclusively by the JSONL watcher (single content
+    source, prevents double-append). The hook still does status side-effects
+    — phase reaction, thread status, pending-approval cleanup — but stays
+    out of _update_progress.
+
+    Regression guard: an earlier version of the hook called
+    _update_progress(is_tool=True) directly, which caused every tool to
+    appear twice once we made the watcher the content source, and caused
+    stale-msg_ts edits when a turn boundary dropped the user-prompt hook.
     """
     daemon = Daemon(config)
     _setup_bound_sync_session(daemon, "sid-notouch")
 
-    # Pretend a previous turn left progress in place and was never popped/finalized.
+    # Seed progress state as if a prior turn were still in flight.
     daemon._progress["sid-notouch"] = {
         "msg_ts": "ts.old", "last_update": 0, "lines": [],
         "_text_blocks": ["prior assistant text"], "_tool": "",
@@ -801,13 +841,10 @@ async def test_post_tool_use_without_preceding_user_prompt_edits_old_msg(
         })
         assert resp.status == 200
 
-    # _update_progress should have edited ts.old via chat_update, not posted fresh.
-    chat_update = daemon._slack.web.chat_update
-    chat_update.assert_awaited()
-    kwargs = chat_update.await_args.kwargs
-    assert kwargs.get("ts") == "ts.old", (
-        "H2 confirmed: post-tool-use without user-prompt edits the stale msg_ts"
-    )
+    # Hook did side-effects (set_thread_status), but did NOT chat_update
+    # the progress message.
+    daemon._slack.web.chat_update.assert_not_awaited()
+    daemon._slack.set_thread_status.assert_awaited()
 
 
 # ── _strip_wrapper_blocks unit tests ──
@@ -892,6 +929,44 @@ async def test_update_progress_accumulates_assistant_text(config: BridgeConfig) 
     chat_update.assert_awaited()
     last_text = chat_update.await_args.kwargs.get("text", "")
     assert "_first thought_" in last_text and "_second thought_" in last_text
+
+
+async def test_update_progress_archives_previous_tool_into_history(
+    config: BridgeConfig,
+) -> None:
+    """When a new tool line arrives, the previous tool line graduates into
+    _text_blocks rather than being dropped. This keeps the full tool timeline
+    visible in the progress message (matches TUI's interleaved thinking+tools).
+    """
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-tools")
+    session = daemon._session_mgr.get("sid-tools")
+
+    # Tool 1: seeds _tool slot.
+    await daemon._update_progress(session, "🪆 `Read` foo.py", is_tool=True)
+    state = daemon._progress["sid-tools"]
+    state["last_update"] = 0
+    assert state["_tool"] == "🪆 `Read` foo.py"
+    assert state["_text_blocks"] == []
+
+    # Tool 2 arrives: tool 1 should be archived into history.
+    await daemon._update_progress(session, "🪆 `Bash` ls", is_tool=True)
+    assert daemon._progress["sid-tools"]["_text_blocks"] == [
+        "🪆 `Read` foo.py"
+    ]
+    assert daemon._progress["sid-tools"]["_tool"] == "🪆 `Bash` ls"
+
+    # A thought interleaves, then tool 3 — both prior tools now in history.
+    daemon._progress["sid-tools"]["last_update"] = 0
+    await daemon._update_progress(session, "● _hmm_")
+    daemon._progress["sid-tools"]["last_update"] = 0
+    await daemon._update_progress(session, "🪆 `Grep` pattern", is_tool=True)
+    assert daemon._progress["sid-tools"]["_text_blocks"] == [
+        "🪆 `Read` foo.py",
+        "● _hmm_",
+        "🪆 `Bash` ls",
+    ]
+    assert daemon._progress["sid-tools"]["_tool"] == "🪆 `Grep` pattern"
 
 
 async def test_update_progress_no_200_char_truncation(config: BridgeConfig) -> None:

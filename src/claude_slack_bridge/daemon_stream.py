@@ -38,20 +38,24 @@ class StreamMixin:
     # ── Progress message (single message, overwritten by final result) ──
 
     async def _update_progress(self, session: Session, line: str, is_tool: bool = False) -> None:
-        """Update progress message with separate slots for text and tool status.
+        """Update progress message with a stream of text/tool events.
 
-        Progress message has two areas that render together:
-        - _text_blocks: all intermediate assistant reasoning so far this turn
-          (accumulated — each new block appends so users see the agent's
-          thinking grow, not just the latest sentence)
-        - _tool: current tool status (single-slot — replaced on each new tool
-          so the line doesn't stack into a wall)
+        Timeline model: every event (thinking block or tool line) is
+        archived into _text_blocks in arrival order so the final Slack
+        message reads like the TUI log. _tool holds the *current* tool
+        line so the streaming cursor stays attached to the most recent
+        action; when a new tool arrives, the previous one graduates
+        into _text_blocks before being overwritten.
         """
         sid = session.session_id
         now = time.time()
         if sid not in self._progress:
             msg_ts = await self._slack.post_text(
                 session.channel_id, line + _CURSOR, session.thread_ts
+            )
+            logger.info(
+                "progress: new message session=%s is_tool=%s ts=%s",
+                sid[:12], is_tool, msg_ts,
             )
             self._progress[sid] = {
                 "msg_ts": msg_ts, "last_update": now, "lines": [],
@@ -61,6 +65,11 @@ class StreamMixin:
         else:
             state = self._progress[sid]
             if is_tool:
+                # Archive the previous tool line into history before
+                # overwriting, so users see the whole tool sequence
+                # instead of just the currently-running one.
+                if state["_tool"]:
+                    state["_text_blocks"].append(state["_tool"])
                 state["_tool"] = line
             else:
                 state["_text_blocks"].append(line)
@@ -218,10 +227,12 @@ class StreamMixin:
 
         for msg in messages:
             if msg.role == "assistant" and msg.text:
-                # Full text, italicized to mark it as streaming thought.
+                # Leading ● mirrors the TUI's bullet marker so Slack
+                # readers and TUI readers see the same visual shape.
+                # Italicized body marks it as streaming thought.
                 # _update_progress accumulates blocks so earlier reasoning
                 # stays visible instead of being overwritten by the latest.
-                await self._update_progress(session, "_" + msg.text + "_")
+                await self._update_progress(session, "● _" + msg.text + "_")
             elif msg.role == "tool_use":
                 detail = ""
                 if msg.tool_name == "Bash":

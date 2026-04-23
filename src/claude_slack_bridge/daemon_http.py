@@ -147,7 +147,11 @@ def _read_last_turn_from_jsonl(conv_parser, session_id: str, cwd: str) -> str:
         start = last_user_idx + 1 if last_user_idx >= 0 else 0
         for msg in all_msgs[start:]:
             if msg.role == "assistant" and msg.text:
-                parts.append(msg.text)
+                # Prefix each block with ● so finalized text matches the
+                # streaming progress (see daemon_stream._on_jsonl_messages)
+                # — otherwise Slack readers get a wall of text while the
+                # TUI shows neat bullets between each reasoning step.
+                parts.append("● " + msg.text)
         return "\n\n".join(parts)
     except Exception:
         return ""
@@ -449,20 +453,11 @@ def create_http_app(daemon) -> web.Application:
                     await _post_or_update_todos(daemon, session, tool_input.get("todos", []))
                     return web.Response(text="ok")
 
-                # Tool/Skill status — different emoji for skills
-                is_skill = tool_name == "Skill"
-                if is_skill:
-                    skill_name = tool_input.get("skill", tool_name)
-                    line = "\U0001f3af `" + skill_name + "`"
-                elif tool_name == "Bash":
-                    line = "\U0001fac6 `Bash` " + tool_input.get("command", "")[:80]
-                elif tool_name in ("Read", "Write", "Edit", "Glob", "Grep"):
-                    line = "\U0001fac6 `" + tool_name + "` " + tool_input.get("file_path", tool_input.get("pattern", ""))[:80]
-                elif tool_name == "Agent":
-                    line = "\U0001f916 `Agent` " + tool_input.get("description", tool_input.get("prompt", ""))[:60]
-                else:
-                    line = "\U0001fac6 `" + tool_name + "`"
-                await daemon._update_progress(session, line, is_tool=True)
+                # Tool status lines are rendered by the JSONL watcher
+                # (_on_jsonl_messages) as the single content source. The
+                # hook's job here is limited to status side-effects —
+                # reaction phase, thread status, pending-approval cleanup
+                # — so we don't double-append the tool line.
             elif hook_type == "stop" and daemon._slack and session.channel_id:
                 # Stop JSONL watcher FIRST — prevents race with finalize
                 daemon._file_watcher.unwatch(session.session_id)
