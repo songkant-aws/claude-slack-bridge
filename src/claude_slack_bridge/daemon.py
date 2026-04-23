@@ -181,12 +181,17 @@ class Daemon(StreamMixin, EventsMixin):
         )
         session.origin = "slack"
 
-        # Pre-seed progress state with reaction controller
+        # Pre-seed progress state with reaction controller. Must include all
+        # keys that either streaming path expects — _text_blocks/_tool for the
+        # HOOK-mode _update_progress display, plus _full_text/_bracket_hold for
+        # the PROCESS-mode stream-event accumulator.
         if reaction_controller:
             self._progress[session_id] = {
                 "msg_ts": None,
                 "last_update": 0,
                 "lines": [],
+                "_text_blocks": [],
+                "_tool": "",
                 "_full_text": "",
                 "_bracket_hold": "",
                 "_reactions": reaction_controller,

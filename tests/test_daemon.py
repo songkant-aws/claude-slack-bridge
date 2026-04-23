@@ -931,6 +931,38 @@ async def test_update_progress_accumulates_assistant_text(config: BridgeConfig) 
     assert "_first thought_" in last_text and "_second thought_" in last_text
 
 
+async def test_update_progress_tolerates_legacy_state_without_text_blocks(
+    config: BridgeConfig,
+) -> None:
+    """PROCESS-mode seed used to write _progress entries that only had
+    _full_text/_bracket_hold — no _text_blocks/_tool. Then the first tool_use
+    event called _update_progress(is_tool=True), which KeyError'd on
+    state['_text_blocks']. That killed intermediate streaming events and
+    the final response showed up truncated in Slack.
+
+    Regression guard: _update_progress must not crash when it finds a
+    pre-seeded progress dict that predates the tool-timeline keys.
+    """
+    daemon = Daemon(config)
+    _setup_bound_sync_session(daemon, "sid-legacy")
+    session = daemon._session_mgr.get("sid-legacy")
+
+    # Pre-seed with the OLD PROCESS-mode schema (what 0.4.5 would have left
+    # behind in _progress when tool_use arrived).
+    daemon._progress["sid-legacy"] = {
+        "msg_ts": "ts.legacy", "last_update": 0, "lines": [],
+        "_full_text": "streaming so far...",
+        "_bracket_hold": "",
+    }
+
+    # First tool_use after the legacy seed — must not raise.
+    await daemon._update_progress(session, "🪆 `Bash` ls", is_tool=True)
+
+    # State was patched up and tool was recorded in the expected slot.
+    assert daemon._progress["sid-legacy"]["_tool"] == "🪆 `Bash` ls"
+    assert daemon._progress["sid-legacy"]["_text_blocks"] == []
+
+
 async def test_update_progress_archives_previous_tool_into_history(
     config: BridgeConfig,
 ) -> None:

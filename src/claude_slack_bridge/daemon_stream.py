@@ -64,6 +64,12 @@ class StreamMixin:
             }
         else:
             state = self._progress[sid]
+            # Tolerate pre-seeded state dicts that may have skipped these
+            # keys (e.g. PROCESS-mode seed before the tool-timeline rework
+            # added them). Callers are expected to seed the keys going
+            # forward; this is the belt-and-braces.
+            state.setdefault("_text_blocks", [])
+            state.setdefault("_tool", "")
             if is_tool:
                 # Archive the previous tool line into history before
                 # overwriting, so users see the whole tool sequence
@@ -253,10 +259,15 @@ class StreamMixin:
         sid = session.session_id
 
         if sid not in self._progress:
+            # Keep schema identical to _start_new_session's pre-seed so the
+            # HOOK-mode _update_progress path (invoked below for tool_use)
+            # doesn't KeyError on _text_blocks/_tool.
             self._progress[sid] = {
                 "msg_ts": None,
                 "last_update": 0,
                 "lines": [],
+                "_text_blocks": [],
+                "_tool": "",
                 "_full_text": "",
                 "_bracket_hold": "",
             }
